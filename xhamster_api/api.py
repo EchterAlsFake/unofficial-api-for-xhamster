@@ -314,6 +314,12 @@ class ShortBuilder:
         self.logger = setup_logger(name="XHamster API - [Short]")
         self.html_content = html_content
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.clean()
+
     def _extract_from_html(self):
         meta = ShortMetadata(
             title=self.title,
@@ -541,13 +547,19 @@ class VideoBuilder:
         self.logger = setup_logger(name="XHamster API - [Video]")
         self.html_content = html_content
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.clean()
+
     async def init(self) -> Video:
         if not self.html_content:
             self.html_content = await get_html_content(core=self.core, url=self.url)
 
         return await asyncio.to_thread(self._extract_from_html)
 
-    def clean(self) -> None:
+    async def clean(self) -> None:
         self.html_content = None
         self.logger = None
         self.url = None
