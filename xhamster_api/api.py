@@ -1,31 +1,32 @@
 from __future__ import annotations
-
 import os
 import urllib
 import logging
 import chompjs
 import asyncio
 
-from dataclasses import dataclass
-from functools import cached_property
+from dataclasses import dataclass, field
 from urllib.parse import urlencode, quote
 from curl_cffi import AsyncSession, Response
 from selectolax.lexbor import LexborHTMLParser
 from base_api.modules.config import RuntimeConfig
 from base_api.modules.type_hints import DownloadReport
-from typing import Literal, AsyncGenerator, Any, Dict, List
-from base_api import DownloadConfigHLS, ScrapeResult, BaseCore, setup_logger, Helper
+from typing import Literal, AsyncGenerator
+from base_api import DownloadConfigHLS, ScrapeResult, BaseCore, Helper, BaseMedia
 from base_api.modules.errors import NetworkRequestError, BotProtectionDetected, UnknownError, InvalidProxy, ResourceGone
 
 from xhamster_api.modules.errors import (NetworkError, UnknownNetworkError, NotFound, BotDetection, ProxyError,
-                                         DownloadFailed)
-from xhamster_api.modules.consts import (build_page_url, extractor_shorts, headers, REGEX_AVATAR, REGEX_M3U8,
-                                        REGEX_THUMBNAIL, REGEX_AUTHOR)
+                                         DownloadFailed, LoginFailed)
+from xhamster_api.modules.consts import (build_page_url, headers, REGEX_AVATAR, REGEX_M3U8, extractor_videos,
+                                        REGEX_THUMBNAIL, extractor_shorts)
 from xhamster_api.modules.type_hints import on_error_hint
 
 
+logger = logging.getLogger(__name__)
+
+
 async def on_error(url: str, error: Exception, attempt: int) -> bool:
-    print(f"URL: {url}, ERROR: {error}, Attempt: {attempt}")
+    logger.error(f"URL: {url}, ERROR: {error}, Attempt: {attempt}")
 
     if isinstance(error, ResourceGone):
         return False
@@ -33,7 +34,7 @@ async def on_error(url: str, error: Exception, attempt: int) -> bool:
     return True
 
 async def get_html_content(core: BaseCore, url: str) -> str | None | dict:
-    # What should I do here?
+    logger.debug(f"Fetching HTML content for URL: {url}")
     try:
         content = await core.fetch(url)
         if isinstance(content, str):
@@ -56,102 +57,108 @@ async def get_html_content(core: BaseCore, url: str) -> str | None | dict:
         raise UnknownNetworkError(str(e)) from e
 
 
-@dataclass(slots=True)
-class ShortMetadata:
-    title: str
-    author: str
-    likes: int
-    dislikes: int
-    views: int
-    comments: int
-    duration: int
-    video_id: int
-    created_at: int
-    tags: list[str]
-    author_subscribers: int
-    author_logo: str
-    author_link: str
-    thumb_url: str
-    poster_url: str
-    m3u8_bas_url: str
+@dataclass(kw_only=True, slots=True)
+class Something(BaseMedia):
+    url: str
+    core: BaseCore
+    name: str | None = None
+    subscribers_count: str | None = None
+    videos_count: str | None = None
+    total_views_count: str | None = None
+    avatar_url: str | None = None
+    pornstar_creator_information: dict | None = None
 
+    # You don't need that
+    _is_pornstar_or_creator: bool = False
 
-class Something(Helper):
-    def __init__(self, lexbor: LexborHTMLParser, url: str, core: BaseCore,
-                 html_content: str):
-        super().__init__(core, video_constructor=VideoBuilder, log_level=logging.ERROR, alternative_constructor=ShortBuilder)
-        self.url = url
-        self.html_content = html_content
-        self.lexbor: LexborHTMLParser = lexbor
+    async def _perform_load(self, api: bool, html: bool, anything_else: bool):
+        if html:
+            await asyncio.gather(self._load_html())
 
-    @classmethod
-    async def init(cls, url: str, core: BaseCore, html_content: str | None = None) -> Something:
-        if not html_content:
-            response = await core.fetch(url)
-            # Ensure we have a string for BeautifulSoup
-            if response is None:
-                html_content = ""
-            elif not isinstance(response, str):
-                html_content = getattr(response, "text", str(response))
-            else:
-                html_content = response
+    async def _load_html(self):
+        html_content = await get_html_content(url=self.url, core=self.core)
+        assert isinstance(html_content, str)
+        data: dict = await asyncio.to_thread(self._extract_data, html_content)
+        self.name = data.get("name")
+        self.subscribers_count = data.get("subscribers_count")
+        self.videos_count = data.get("videos_count")
+        self.total_views_count = data.get("total_views_count")
+        self.avatar_url = data.get("avatar_url")
+        self.pornstar_creator_information = data.get("pornstar_information", None)
 
-        lexbor = LexborHTMLParser(html_content)
-        return cls(lexbor=lexbor, url=url, core=core, html_content=html_content)
+    def _extract_data(self, html_content: str) -> dict:
+        parser = LexborHTMLParser(html_content)
+        if self._is_pornstar_or_creator:
+            name = parser.css_first("h2.h3-bold-8643e.primary-8643e.landing-info__user-title").text(strip=True)
 
-    def _find_text(self, name: str, index: int = 0) -> str:
-        """Safely find a tag and return its stripped text, or an empty string."""
-        tag = self.lexbor.css(name)[index]
-        return tag.text(strip=True) if tag else ""
+        else:
+            name = parser.css_first("h1.h3-bold-8643e.primary-8643e.landing-info__user-title").text(strip=True)
 
-    @cached_property
-    def name(self) -> str:
-        return self._find_text("h1.h3-bold-8643e.primary-8643e.landing-info__user-title")
+        subscribers_count = parser.css_first("div.body-8643e.primary-8643e.landing-info__metric-value").text(strip=True)
+        videos_count = parser.css("div.body-8643e.primary-8643e.landing-info__metric-value")[1].text(strip=True)
+        total_views_count =  parser.css("div.body-8643e.primary-8643e.landing-info__metric-value")[2].text(strip=True)
+        avatar_url = REGEX_AVATAR.search(html_content).group(1)
+        dictionary = {}
 
-    @cached_property
-    def subscribers_count(self) -> str:
-        return self._find_text("div.body-8643e.primary-8643e.landing-info__metric-value")
+        if self._is_pornstar_or_creator:
+            container = parser.css_first("div.personalInfo-5360e")
+            if container:
+                li_tags = container.css("li")
+                fortnite = parser.css("ul.list-b51e4")
+                if len(fortnite) > 1:
+                    li_tags.extend(fortnite[1].css("li"))
 
-    @cached_property
-    def videos_count(self) -> str:
-        return self._find_text("div.body-8643e.primary-8643e.landing-info__metric-value", index=1)
+                for li_tag in li_tags:
+                    divs = li_tag.css("div")
+                    if len(divs) >= 2:
+                        key = divs[0].text(strip=True)
+                        value = divs[1].text(strip=True)
+                        dictionary[key] = value
 
-    @cached_property
-    def total_views_count(self) -> str:
-        return self._find_text("div.body-8643e.primary-8643e.landing-info__metric-value", index=2)
+        return {
+            "name": name,
+            "subscribers_count": subscribers_count,
+            "videos_count": videos_count,
+            "total_views_count": total_views_count,
+            "avatar_url": avatar_url,
+            "pornstar_information": dictionary
+        }
 
-    @cached_property
-    def avatar_url(self) -> str:
-        return REGEX_AVATAR.search(self.html_content).group(1)
 
     async def videos(self, pages: int = 2, videos_concurrency: int | None = None, pages_concurrency: int | None = None,
                      on_video_error: on_error_hint = on_error,
                      on_page_error: on_error_hint = None,
-                     keep_original_order: bool = False
+                     keep_original_order: bool = False,
+                     load_html: bool = False,
                      ) -> AsyncGenerator[ScrapeResult, None]:
+        helper = Helper(core=self.core, constructor=Video)
         page_urls = [build_page_url(url=self.url, is_search=False, idx=page) for page in range(1, pages + 1)]
         videos_concurrency = videos_concurrency or self.core.configuration.videos_concurrency
         pages_concurrency = pages_concurrency or self.core.configuration.pages_concurrency
         assert videos_concurrency and pages_concurrency
 
-        async for scrape_result in self.iterator(use_alternative_constructor=True, video_link_extractor=extractor_shorts,
+        async for scrape_result in helper.iterator(video_link_extractor=extractor_videos,
                                  max_video_concurrency=videos_concurrency, max_page_concurrency=pages_concurrency,
                                  on_video_error=on_video_error, on_page_error=on_page_error, target_page_urls=page_urls,
-                                 keep_original_order=keep_original_order):
+                                 keep_original_order=keep_original_order, fetch_html=load_html):
             yield scrape_result
 
 
     async def get_shorts(self, pages: int = 2, videos_concurrency: int = 2, pages_concurrency: int = 1,
                          on_video_error: on_error_hint = on_error,
                          on_page_error: on_error_hint = None,
-                         keep_original_order: bool = False
+                         keep_original_order: bool = False,
+                         load_html: bool = False
                          ) -> AsyncGenerator[ScrapeResult, None]:
-        if not self.url.endswith("/"):
-            self.url += "/"
+        url = self.url
 
-        self.url += "shorts"
-        page_urls = [build_page_url(self.url, is_search=False, idx=page) for page in range(1, pages + 1)]
-        async for scrape_result in self.iterator(use_alternative_constructor=True, video_link_extractor=extractor_shorts,
+        if not url.endswith("/"):
+            url += "/"
+
+        url += "shorts"
+        page_urls = [build_page_url(url, is_search=False, idx=page) for page in range(1, pages + 1)]
+        helper = Helper(core=self.core, constructor=Short)
+        async for scrape_result in helper.iterator(video_link_extractor=extractor_shorts, fetch_html=load_html,
                                  target_page_urls=page_urls, max_video_concurrency=videos_concurrency,
                                  max_page_concurrency=pages_concurrency, on_video_error=on_video_error,
                                  on_page_error=on_page_error, keep_original_order=keep_original_order):
@@ -162,582 +169,330 @@ class Channel(Something):
     pass
 
 
+@dataclass(kw_only=True, slots=True)
 class Pornstar(Something):
+    _is_pornstar_or_creator: bool = field(default=True, init=False)
 
-    @cached_property
-    def name(self) -> str:
-        return self._find_text("h2.h3-bold-8643e.primary-8643e.landing-info__user-title")
 
-    @cached_property
-    def get_information(self) -> Dict[str, str] | None:
-        container = self.lexbor.css_first("div.personalInfo-5360e")
-        if not container:
-            return None # No User Information present...
-
-        li_tags = container.css("li")
-        fortnite = self.lexbor.css("ul.list-b51e4")
-        if len(fortnite) > 1:
-            li_tags.extend(fortnite[1].css("li"))
-
-        dictionary = {}
-
-        for li_tag in li_tags:
-            divs = li_tag.css("div")
-            if len(divs) >= 2:
-                key = divs[0].text(strip=True)
-                value = divs[1].text(strip=True)
-                dictionary[key] = value
-
-        return dictionary
-
+@dataclass(kw_only=True, slots=True)
 class Creator(Something):
+    _is_pornstar_or_creator: bool = field(default=True, init=False)
 
-    @cached_property
-    def name(self) -> str:
-        return self._find_text("h2.h3-bold-8643e.primary-8643e.landing-info__user-title")
 
-    @cached_property
-    def get_information(self) -> Dict[str, str] | None:
-        container = self.lexbor.css_first("div.personalInfo-5360e")
-        if not container:
-            return None # No User Information present...
-
-        li_tags = container.css("li")
-        fortnite = self.lexbor.css("ul.list-b51e4")
-        if len(fortnite) > 1:
-            li_tags.extend(fortnite[1].css("li"))
-
-        dictionary = {}
-
-        for li_tag in li_tags:
-            divs = li_tag.css("div")
-            if len(divs) >= 2:
-                key = divs[0].text(strip=True)
-                value = divs[1].text(strip=True)
-                dictionary[key] = value
-
-        return dictionary
-
-class Short:
-    __slots__ = ("metadata", "core")
-
-    def __init__(self, metadata: ShortMetadata, core: BaseCore):
-        self.metadata = metadata
+class Account:
+    def __init__(self, core: BaseCore):
         self.core = core
 
-    @property
-    def title(self) -> str:
-        return self.metadata.title
+    async def get_liked_videos(self, pages: int = 2, videos_concurrency: int | None = None, pages_concurrency: int | None = None,
+                     on_video_error: on_error_hint = on_error,
+                     on_page_error: on_error_hint = None,
+                     keep_original_order: bool = False,
+                     load_html: bool = False,
+                     ) -> AsyncGenerator[ScrapeResult, None]:
+        helper = Helper(core=self.core, constructor=Video)
+        page_urls = [f"https://xhamster.com/my/liked/videos?page={page}" for page in range(1, pages + 1)]
+        videos_concurrency = videos_concurrency or self.core.configuration.videos_concurrency
+        pages_concurrency = pages_concurrency or self.core.configuration.pages_concurrency
+        assert videos_concurrency and pages_concurrency
 
-    @property
-    def likes(self) -> int:
-        return self.metadata.likes
+        async for scrape_result in helper.iterator(video_link_extractor=extractor_videos,
+                                                   max_video_concurrency=videos_concurrency,
+                                                   max_page_concurrency=pages_concurrency,
+                                                   on_video_error=on_video_error, on_page_error=on_page_error,
+                                                   target_page_urls=page_urls,
+                                                   keep_original_order=keep_original_order, fetch_html=load_html):
+            yield scrape_result
 
-    @property
-    def dislikes(self) -> int:
-        return self.metadata.dislikes
+    async def get_account_playlist(self, url: str, pages: int = 2, videos_concurrency: int | None = None,
+                               pages_concurrency: int | None = None,
+                               on_video_error: on_error_hint = on_error,
+                               on_page_error: on_error_hint = None,
+                               keep_original_order: bool = False,
+                               load_html: bool = False) -> AsyncGenerator[ScrapeResult, None]:
+        helper = Helper(core=self.core, constructor=Video)
+        page_urls = [f"{url}?page={page}" for page in range(1, pages + 1)]
+        videos_concurrency = videos_concurrency or self.core.configuration.videos_concurrency
+        pages_concurrency = pages_concurrency or self.core.configuration.pages_concurrency
+        assert videos_concurrency and pages_concurrency
 
-    @property
-    def views(self) -> int:
-        return self.metadata.views
-
-    @property
-    def comments(self) -> int:
-        return self.metadata.comments
-
-    @property
-    def duration(self) -> int:
-        return self.metadata.duration
-
-    @property
-    def video_id(self) -> int:
-        return self.metadata.video_id
-
-    @property
-    def created_at(self) -> int:
-        return self.metadata.created_at
-
-    @property
-    def tags(self) -> list[str]:
-        return self.metadata.tags
-
-    @property
-    def author(self) -> str:
-        return self.metadata.author
-
-    @property
-    def author_subscribers(self) -> int:
-        return self.metadata.author_subscribers
-
-    @property
-    def author_logo(self) -> str:
-        return self.metadata.author_logo
-
-    @property
-    def author_link(self) -> str:
-        return self.metadata.author_link
-
-    @property
-    def thumb_url(self) -> str:
-        return self.metadata.thumb_url
-
-    @property
-    def poster_url(self) -> str:
-        return self.metadata.poster_url
-
-    @property
-    def m3u8_base_url(self) -> str:
-        return self.metadata.m3u8_bas_url
-
-    async def download(self, configuration: DownloadConfigHLS) -> bool | DownloadReport:
-        """
-        :param configuration:
-        :return:
-        """
-
-        if not configuration.no_title:
-            configuration.path = os.path.join(configuration.path, f"{self.title}.mp4")
-
-        configuration.m3u8_base_url = self.m3u8_base_url
-
-        try:
-            return await self.core.download(configuration=configuration)
-
-        except Exception as e:
-            raise DownloadFailed(str(e))
+        async for scrape_result in helper.iterator(video_link_extractor=extractor_videos,
+                                                   max_video_concurrency=videos_concurrency,
+                                                   max_page_concurrency=pages_concurrency,
+                                                   on_video_error=on_video_error, on_page_error=on_page_error,
+                                                   target_page_urls=page_urls,
+                                                   keep_original_order=keep_original_order, fetch_html=load_html):
+            yield scrape_result
 
 
-class ShortBuilder:
-    def __init__(self, url: str, core: BaseCore, html_content: str | None = None):
-        self.core = core
-        self.url = url
-        self.logger = setup_logger(name="XHamster API - [Short]")
-        self.html_content = html_content
+@dataclass(kw_only=True, slots=True)
+class Short(BaseMedia):
+    core: BaseCore
+    url: str
+    title: str | None = None
+    tags: list[str] | None = None
+    thumbnail: str | None = None
+    video_id: str | None = None
+    comment_count: str | None = None
+    duration: str | None = None
+    created_at: str | None = None
+    poster_url: str | None = None
+    author_link: str | None = None
+    author_logo: str | None = None
+    m3u8_base_url: str | None = None
+    likes: str | None = None
+    views: str | None = None
+    author_subscribers: str | None = None
+    author: str | None = None
 
-    async def __aenter__(self):
-        return self
+    # Optional
+    preview_video: str | None = None
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.clean()
 
-    def _extract_from_html(self):
-        meta = ShortMetadata(
-            title=self.title,
-            dislikes=self.dislikes,
-            tags=self.tags,
-            thumb_url=self.thumb_url,
-            video_id=self.video_id,
-            comments=self.comments,
-            duration=self.duration,
-            created_at=self.created_at,
-            poster_url=self.poster_url,
-            author_link=self.author_link,
-            author_logo=self.author_logo,
-            m3u8_bas_url=self.m3u8_base_url,
-            likes=self.likes,
-            views=self.views,
-            author_subscribers=self.author_subscribers,
-            author=self.author,
-        )
+    async def _perform_load(self, api: bool, html: bool, anything_else: bool):
+        if html:
+            await asyncio.gather(self._fetch_html())
 
-        short = Short(metadata=meta, core=self.core)
-        return short
+    async def _fetch_html(self) -> None:
+        html_content = await get_html_content(core=self.core, url=self.url)
+        assert isinstance(html_content, str)
+        data: dict = await asyncio.to_thread(self._extract_data, html_content)
+        self.title = data.get("title")
+        self.author = data.get("author")
+        self.likes = data.get("likes")
+        self.views = data.get("views")
+        self.comment_count = data.get("comments")
+        self.duration = data.get("duration")
+        self.video_id = data.get("video_id")
+        self.created_at = data.get("created_at")
+        self.tags = data.get("tags")
+        self.author_subscribers = data.get("subscribers")
+        self.author_logo = data.get("author_logo")
+        self.author_link = data.get("author_link")
+        self.thumbnail = data.get("thumb_url")
+        self.poster_url = data.get("poster_url")
+        self.m3u8_base_url = data.get("m3u8_base_url")
 
-    async def clean(self) -> None:
-        self.core = None
-        self.url = None
-        self.html_content = None
-        self.logger = None
-        self.data = None
-
-    async def init(self) -> Short:
-        if not self.html_content:
-            self.html_content = await get_html_content(core=self.core, url=self.url)
-            assert self.html_content
-
-        return await asyncio.to_thread(self._extract_from_html)
-
-    @cached_property
-    def data(self) -> dict:
-        assert self.html_content
-        lexbor = LexborHTMLParser(self.html_content)
+    @staticmethod
+    def _extract_data(html_content: str) -> dict:
+        lexbor = LexborHTMLParser(html_content)
         script = lexbor.css_first("script#initials-script").text()
         # Extract the JSON part after 'window.initials='
         json_text = script.split("window.initials=", 1)[-1].strip().rstrip(";")
-        return chompjs.parse_js_object(json_text)
-
-    @cached_property
-    def title(self) -> str:
-        return self.data.get('layoutPage', {}).get('momentProps', {}).get('title', '')
-
-    @cached_property
-    def author(self) -> str:
-        author = self.data.get('layoutPage', {}).get('momentProps', {}).get('landing', {}).get('name')
-        return str(author) if author else ""
-
-    @cached_property
-    def likes(self) -> int:
-        likes = self.data.get('layoutPage', {}).get('momentProps', {}).get('ratingModel', {}).get('likes')
-        return int(likes) if likes is not None else 0
-
-    @cached_property
-    def dislikes(self) -> int:
-        dislikes = self.data.get('layoutPage', {}).get('momentProps', {}).get('ratingModel', {}).get('dislikes')
-        return int(dislikes) if dislikes is not None else 0
-
-    @cached_property
-    def views(self) -> int:
-        views = self.data.get('layoutPage', {}).get('momentProps', {}).get('views')
-        return int(views) if views is not None else 0
-
-    @cached_property
-    def comments(self) -> int:
-        comments = self.data.get('layoutPage', {}).get('momentProps', {}).get('comments')
-        return int(comments) if comments is not None else 0
-
-    @cached_property
-    def duration(self) -> int:
-        duration = self.data.get('xplayerSettings', {}).get('duration')
-        return int(duration) if duration is not None else 0
-
-    @cached_property
-    def video_id(self) -> int:
-        video_id = self.data.get('xplayerSettings', {}).get('videoId')
+        data = chompjs.parse_js_object(json_text)
+        title = data.get('layoutPage', {}).get('momentProps', {}).get('title', '')
+        author = data.get('layoutPage', {}).get('momentProps', {}).get('landing', {}).get('name')
+        likes = data.get('layoutPage', {}).get('momentProps', {}).get('ratingModel', {}).get('likes')
+        views = data.get('layoutPage', {}).get('momentProps', {}).get('views')
+        comments = data.get('layoutPage', {}).get('momentProps', {}).get('comments')
+        duration = data.get('xplayerSettings', {}).get('duration')
+        video_id = data.get('xplayerSettings', {}).get('videoId')
         if not video_id:
-             video_id = self.data.get('layoutPage', {}).get('momentProps', {}).get('id')
-        return int(video_id) if video_id is not None else 0
+             video_id = data.get('layoutPage', {}).get('momentProps', {}).get('id')
 
-    @cached_property
-    def created_at(self) -> int:
-        created = self.data.get('layoutPage', {}).get('momentProps', {}).get('created')
-        return int(created) if created is not None else 0
+        created = data.get('layoutPage', {}).get('momentProps', {}).get('created')
+        tags = data.get('layoutPage', {}).get('momentProps', {}).get('tags', [])
+        subscribers = data.get('layoutPage', {}).get('momentProps', {}).get('landing', {}).get('subscribers')
+        author_logo = data.get('layoutPage', {}).get('momentProps', {}).get('landing', {}).get('logo', '')
+        author_link = data.get('layoutPage', {}).get('momentProps', {}).get('landing', {}).get('link', '')
+        thumb_url = data.get('layoutPage', {}).get('momentProps', {}).get('thumbUrl', '')
+        poster_url = data.get('layoutPage', {}).get('momentProps', {}).get('posterUrl', '')
+        m3u8_base_url = data.get('xplayerSettings', {}).get('sources', {}).get('hls', {}).get('h264', {}).get('url')
+        if not m3u8_base_url:
+            m3u8_base_url = data.get('layoutPage', {}).get('momentProps', {}).get('sources', {}).get('hls', {}).get('h264', {}).get('url')
 
-    @cached_property
-    def tags(self) -> List[str]:
-        tags = self.data.get('layoutPage', {}).get('momentProps', {}).get('tags', [])
-        return [tag.get('name') for tag in tags if tag.get('name')]
-
-    @cached_property
-    def author_subscribers(self) -> int:
-        subscribers = self.data.get('layoutPage', {}).get('momentProps', {}).get('landing', {}).get('subscribers')
-        return int(subscribers) if subscribers is not None else 0
-
-    @cached_property
-    def author_logo(self) -> str:
-        return self.data.get('layoutPage', {}).get('momentProps', {}).get('landing', {}).get('logo', '')
-
-    @cached_property
-    def author_link(self) -> str:
-        return self.data.get('layoutPage', {}).get('momentProps', {}).get('landing', {}).get('link', '')
-
-    @cached_property
-    def thumb_url(self) -> str:
-        return self.data.get('layoutPage', {}).get('momentProps', {}).get('thumbUrl', '')
-
-    @cached_property
-    def poster_url(self) -> str:
-        return self.data.get('layoutPage', {}).get('momentProps', {}).get('posterUrl', '')
-
-    @cached_property
-    def m3u8_base_url(self) -> str:
-        url = self.data.get('xplayerSettings', {}).get('sources', {}).get('hls', {}).get('h264', {}).get('url')
-        if not url:
-            url = self.data.get('layoutPage', {}).get('momentProps', {}).get('sources', {}).get('hls', {}).get('h264', {}).get('url')
-        return str(url) if url else ""
-
-
-@dataclass(slots=True)
-class VideoMetadata:
-    title: str
-    video_id: int | None
-    rating_percentage: int
-    likes: int
-    dislikes: int
-    _uploader_tag_model: Dict[str, Any]
-    uploader_name: str
-    uploader_subscribers: int
-    categories: list[str]
-    tags: list[str]
-    pornstars: list[str]
-    thumbnail: str
-    m3u8_base_url: str
-
-
-class Video:
-    __slots__ = ["metadata", "core"]
-    def __init__(self, metadata: VideoMetadata, core: BaseCore):
-        self.metadata = metadata
-        self.core = core
-
-    @property
-    def title(self) -> str:
-        return self.metadata.title
-
-    @property
-    def video_id(self) -> int | None:
-        return self.metadata.video_id
-
-    @property
-    def rating_percentage(self) -> int:
-        return self.metadata.rating_percentage
-
-    @property
-    def likes(self) -> int:
-        return self.metadata.likes
-
-    @property
-    def dislikes(self) -> int:
-        return self.metadata.dislikes
-
-    @property
-    def _uploader_tag_model(self) -> Dict[str, Any]:
-        return self.metadata._uploader_tag_model
-
-    @property
-    def uploader_name(self) -> str:
-        return self.metadata.uploader_name
-
-    @property
-    def uploader_subcribers(self) -> int:
-        return self.metadata.uploader_subscribers
-
-    @property
-    def categories(self) -> list[str]:
-        return self.metadata.categories
-
-    @property
-    def tags(self) -> list[str]:
-        return self.metadata.tags
-
-    @property
-    def pornstars(self) -> list[str]:
-        return self.metadata.pornstars
-
-    @property
-    def thumbnail(self) -> str:
-        return self.metadata.thumbnail
-
-    @property
-    def m3u8_base_url(self) -> str:
-        return self.metadata.m3u8_base_url
+        return {
+            "title": title,
+            "author": author,
+            "likes": likes,
+            "views": views,
+            "comments": comments,
+            "duration": duration,
+            "video_id": video_id,
+            "created_at": created,
+            "tags": tags,
+            "subscribers": subscribers,
+            "author_logo": author_logo,
+            "author_link": author_link,
+            "thumb_url": thumb_url,
+            "poster_url": poster_url,
+            "m3u8_base_url": m3u8_base_url
+        }
 
     async def download(self, configuration: DownloadConfigHLS) -> bool | DownloadReport:
         """
         :param configuration:
         :return:
         """
+        config = configuration
 
-        if not configuration.no_title:
-            configuration.path = os.path.join(configuration.path, f"{self.title}.mp4")
+        if not config.no_title:
+            config.path = os.path.join(config.path, f"{self.title}.mp4")
 
-        configuration.m3u8_base_url = self.m3u8_base_url
+        config.m3u8_base_url = self.m3u8_base_url
 
         try:
-            return await self.core.download(configuration=configuration)
+            logger.info(f"Starting download for Short: {self.title}")
+            return await self.core.download(configuration=config)
 
         except Exception as e:
             raise DownloadFailed(str(e))
 
 
 
-class VideoBuilder:
-    def __init__(self, url: str, core: BaseCore, html_content: str | None = None):
-        self.core = core
-        self.url = url
-        self.logger = setup_logger(name="XHamster API - [Video]")
-        self.html_content = html_content
+@dataclass(slots=True, kw_only=True)
+class Video(BaseMedia):
+    core: BaseCore
+    url: str
+    video_id: str | None = None
+    title: str | None = None
+    rating_percentage: int | None = None
+    likes: int | None = None
+    dislikes: int | None = None
+    uploader_name: str | None = None
+    uploader_subscribers: str | None = None
+    tags: list[str] | None = None
+    categories: list[str] | None = None
+    pornstars: list[str] | None = None
+    thumbnail: str | None = None
+    m3u8_base_url: str | None = None
 
-    async def __aenter__(self):
-        return self
+    # Optional
+    length: str | None = None
+    preview_video: str | None = None
+    views: str | None = None
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.clean()
+    async def _perform_load(self, api: bool, html: bool, anything_else: bool):
+        if html:
+            await asyncio.gather(self._fetch_html())
 
-    async def init(self) -> Video:
-        if not self.html_content:
-            self.html_content = await get_html_content(core=self.core, url=self.url)
+    async def _fetch_html(self) -> None:
+        html_content = await get_html_content(core=self.core, url=self.url)
+        assert isinstance(html_content, str)
+        data: dict = await asyncio.to_thread(self._extract_html, html_content)
+        self.video_id = data.get("video_id")
+        self.title = data.get("title")
+        self.rating_percentage = data.get("rating_percentage")
+        self.likes = data.get("likes")
+        self.dislikes = data.get("dislikes")
+        self.uploader_name = data.get("uploader_name")
+        self.uploader_subscribers = data.get("uploader_subscribers")
+        self.tags = data.get("tags")
+        self.categories = data.get("categories")
+        self.pornstars = data.get("pornstars")
+        self.thumbnail = data.get("thumbnail")
+        self.m3u8_base_url = data.get("m3u8_base_url")
 
-        return await asyncio.to_thread(self._extract_from_html)
-
-    async def clean(self) -> None:
-        self.html_content = None
-        self.logger = None
-        self.url = None
-        self.core = None
-
-    def _extract_from_html(self) -> Video:
-        meta = VideoMetadata(
-            title=self.title,
-            video_id=self.video_id,
-            rating_percentage=self.rating_percentage,
-            dislikes=self.dislikes,
-            likes=self.likes,
-            _uploader_tag_model=self._uploader_tag_model,
-            uploader_name=self.uploader_name,
-            uploader_subscribers=self.uploader_subscribers,
-            pornstars=self.pornstars,
-            thumbnail=self.thumbnail,
-            categories=self.categories,
-            m3u8_base_url=self.m3u8_base_url,
-            tags=self.tags,
-        )
-
-        video = Video(metadata=meta, core=self.core)
-        return video
-
-    def enable_logging(self, log_file: str | None = None, level: int = logging.DEBUG, log_ip: str | None = None, log_port: int | None = None) -> None:
-        self.logger = setup_logger(name="XHamster API - [Video]", level=level, log_file=log_file, http_ip=log_ip, http_port=log_port)
-
-    @cached_property
-    def data(self) -> dict:
-        assert self.html_content
-        lexbor = LexborHTMLParser(self.html_content)
+    @staticmethod
+    def _extract_html(html_content) -> dict:
+        lexbor = LexborHTMLParser(html_content)
         script = lexbor.css_first("script#initials-script").text()
-        # Extract the JSON part after 'window.initials='
         json_text = script.split("window.initials=", 1)[-1].strip().rstrip(";")
-        return chompjs.parse_js_object(json_text)
-
-    @cached_property
-    def video_id(self) -> int | None:
-        """Extracts the unique numerical ID of the video."""
-        return self.data.get("videoTagsComponent", {}).get("videoId")
-
-    @cached_property
-    def title(self) -> str:
-        """Extracts and decodes the video title.
-
-        Note: In this specific payload, the plain text title is nested
-        inside an advertising/widget callback URL, so we parse it out cleanly.
-        """
-        data_url = (
-            self.data.get("bannerUnderComments", {})
-            .get("fh", {})
-            .get("dataUrl", "")
-        )
+        data = chompjs.parse_js_object(json_text)
+        video_id = data.get("videoTagsComponent", {}).get("videoId")
+        title = None
+        data_url = data.get("bannerUnderComments", {}).get("fh", {}).get("dataUrl", "")
         if data_url:
             parsed_url = urllib.parse.urlparse(data_url)
             query_params = urllib.parse.parse_qs(parsed_url.query)
             titles = query_params.get("videoTitle", [])
             if titles:
-                return urllib.parse.unquote_plus(titles[0])
-        return ""
+                title = urllib.parse.unquote_plus(titles[0])
 
-    @cached_property
-    def rating_percentage(self) -> int:
-        """Returns the user approval rating percentage (e.g., 99)."""
-        return (
-            self.data.get("ratingComponent", {})
-            .get("ratingModel", {})
-            .get("value", 0)
-        )
+        rating_percentage = data.get("ratingComponent", {}).get("ratingModel", {}).get("value", 0)
+        likes = data.get("ratingComponent", {}).get("ratingModel", {}).get("likes", 0)
+        dislikes = data.get("ratingComponent", {}).get("ratingModel", {}).get("dislikes", 0)
+        _uploader_tag_model = {}
 
-    @cached_property
-    def likes(self) -> int:
-        """Total number of upvotes/likes."""
-        return (
-            self.data.get("ratingComponent", {})
-            .get("ratingModel", {})
-            .get("likes", 0)
-        )
-
-    @cached_property
-    def dislikes(self) -> int:
-        """Total number of downvotes/dislikes."""
-        return (
-            self.data.get("ratingComponent", {})
-            .get("ratingModel", {})
-            .get("dislikes", 0)
-        )
-
-    @cached_property
-    def _uploader_tag_model(self) -> Dict[str, Any]:
-        """Internal helper to find the tag object representing the uploader."""
-        tags = self.data.get("videoTagsComponent", {}).get("tags", [])
-        for tag in tags:
+        _tags = data.get("videoTagsComponent", {}).get("tags", [])
+        for tag in _tags:
             if tag.get("isUser"):
-                return tag
-        return {}
+                _uploader_tag_model = tag
 
-    @cached_property
-    def uploader_name(self) -> str:
-        """The username of the content creator/uploader."""
-        return self._uploader_tag_model.get("name", "")
+        uploader_name = _uploader_tag_model.get("name", "")
 
-    @cached_property
-    def uploader_subscribers(self) -> int:
-        """The total subscriber count of the uploader."""
-        sub_model = self._uploader_tag_model.get("subscriptionModel") or {}
-        return sub_model.get("subscribers", 0)
+        if not uploader_name:
+            uploader_name = lexbor.css_first("div.item-50dd2").css_first("span.body-bold-8643e.label-5984a.label-96c3e").text(strip=True)
 
-    @cached_property
-    def categories(self) -> List[str]:
-        """Returns a list of high-level site categories assigned to the video
+        sub_model = _uploader_tag_model.get("subscriptionModel") or {}
+        uploader_subscribers = sub_model.get("subscribers", 0)
+        categories = [tag["name"] for tag in _tags if tag.get("isCategory") and "name" in tag]
 
-        (e.g., ['Colombian', '3D', 'Big Tits']).
+        tags = [tag["name"] for tag in _tags if tag.get("isTag") and "name" in tag]
+
+        container = lexbor.css_first("div[data-role='video-tags-list']")
+
+        actor_elements = container.css('a[href*="/pornstars/"], a[href*="/creators/"]')
+
+        pornstars = []
+        for element in actor_elements:
+            name = element.text(strip=True)
+            pornstars.append(name)
+
+
+        thumbnail = REGEX_THUMBNAIL.search(html_content).group(1)
+        _url = REGEX_M3U8.search(html_content).group(0)
+        m3u8_base_url = _url.replace("\\/", "/")  # Fixing escaped slashes
+
+        return {
+            "video_id": video_id,
+            "title": title,
+            "rating_percentage": rating_percentage,
+            "likes": likes,
+            "dislikes": dislikes,
+            "uploader_name": uploader_name,
+            "uploader_subscribers": uploader_subscribers,
+            "categories": categories,
+            "tags": tags,
+            "pornstars": pornstars,
+            "thumbnail": thumbnail,
+            "m3u8_base_url": m3u8_base_url
+        }
+
+    async def download(self, configuration: DownloadConfigHLS) -> bool | DownloadReport:
         """
-        tags = self.data.get("videoTagsComponent", {}).get("tags", [])
-        return [
-            tag["name"]
-            for tag in tags
-            if tag.get("isCategory") and "name" in tag
-        ]
-
-    @cached_property
-    def tags(self) -> List[str]:
-        """Returns a list of micro-tags assigned to the video
-
-        (e.g., ['Hot MILF', 'Anime Hentai']).
+        :param configuration:
+        :return:
         """
-        tags = self.data.get("videoTagsComponent", {}).get("tags", [])
-        return [
-            tag["name"] for tag in tags if tag.get("isTag") and "name" in tag
-        ]
+        config = configuration
+        if not config.no_title:
+            config.path = os.path.join(config.path, f"{self.title}.mp4")
+
+        config.m3u8_base_url = self.m3u8_base_url
+
+        try:
+            logger.info(f"Starting download for Video: {self.title}")
+            return await self.core.download(configuration=config)
+
+        except Exception as e:
+            raise DownloadFailed(str(e))
 
 
-    @cached_property
-    def pornstars(self) -> List[str]:
-        matches = REGEX_AUTHOR.findall(self.html_content)
-        actual_pornstars = []
-        for match in matches:
-            actual_pornstars.append(match[1])
-
-        return actual_pornstars
-
-    @cached_property
-    def thumbnail(self) -> str:
-        return REGEX_THUMBNAIL.search(self.html_content).group(1)
-
-    @cached_property
-    def m3u8_base_url(self) -> str:
-        url =  REGEX_M3U8.search(self.html_content).group(0)
-        fixed_url = url.replace("\\/", "/")  # Fixing escaped slashes
-        self.logger.debug(f"M3U8 URL: {fixed_url}")
-        return fixed_url
-
-
-class Client(Helper):
+class Client:
     def __init__(self, core: BaseCore = BaseCore(RuntimeConfig())):
-        super().__init__(core=core, video_constructor=VideoBuilder)
+        self.core = core
         self.core.initialize_session()
         assert isinstance(self.core.session, AsyncSession)
         self.core.session.headers.update(headers)
 
-    async def get_video(self, url: str) -> Video:
-        video = VideoBuilder(url, core=self.core)
-        return await video.init()
+    async def get_video(self, url: str, load_html: bool = True) -> Video:
+        video = Video(url=url, core=self.core)
+        return await video.load(html=load_html)
 
-    async def get_pornstar(self, url: str) -> Pornstar:
-        return await Pornstar.init(url=url, core=self.core)
+    async def get_pornstar(self, url: str, load_html: bool = True) -> Pornstar:
+        pornstar = Pornstar(url=url, core=self.core)
+        return await pornstar.load(html=load_html)
 
-    async def get_creator(self, url: str) -> Creator:
-        return await Creator.init(url=url, core=self.core)
+    async def get_creator(self, url: str, load_html: bool = True) -> Creator:
+        creator = Creator(url=url, core=self.core)
+        return await creator.load(html=load_html)
 
-    async def get_channel(self, url: str) -> Channel:
-        return await Channel.init(url=url, core=self.core)
+    async def get_channel(self, url: str, load_html: bool = True) -> Channel:
+        channel = Channel(url=url, core=self.core)
+        return await channel.load(html=load_html)
 
-    async def get_short(self, url: str) -> Short:
-        short = ShortBuilder(url, core=self.core)
-        return await short.init()
+    async def get_short(self, url: str, load_html: bool = True) -> Short:
+        short = Short(url=url, core=self.core)
+        return await short.load(html=load_html)
 
     async def search_videos(self, query: str,
         minimum_quality: Literal["720p", "1080p", "2160p"] = "720p",
@@ -745,7 +500,7 @@ class Client(Helper):
 
         category: Literal["german", "amateur", "18-year-old", "granny", "anal", "old-young", "mature",
         "mom", "milf", "big-tits", "big-natural-tits", "lesbian", "teen", "cum-in-mouth", "bdsm",
-        "porn-for-women", "russian", "vintage", "hairy", "brutal-sex"] | List[str] | None = None ,
+        "porn-for-women", "russian", "vintage", "hairy", "brutal-sex"] | list[str] | None = None ,
         vr: bool = False,
         full_length_only: bool = False,
         min_duration: Literal["2", "5", "10", "30", "40"] | None = None,
@@ -755,7 +510,8 @@ class Client(Helper):
         pages: int = 2, videos_concurrency: int | None = None, pages_concurrency: int | None = None,
                             on_video_error: on_error_hint = on_error,
                             on_page_error: on_error_hint = None,
-                            keep_original_order: bool = False
+                            keep_original_order: bool = False,
+                            load_html: bool = False,
                             ) -> AsyncGenerator[ScrapeResult, None]:
         path = quote(str(query), safe="")  # e.g. "4k cats & dogs" -> "4k%20cats%20%26%20dogs"
         base = f"https://xhamster.com/search/"
@@ -798,9 +554,56 @@ class Client(Helper):
         page_urls = [build_page_url(url=final_url, is_search=True, idx=page) for page in range(1, pages + 1)]
         assert isinstance(videos_concurrency, int)
         assert isinstance(pages_concurrency, int)
-
-        async for scrape_result in self.iterator(use_alternative_constructor=True, video_link_extractor=extractor_shorts, target_page_urls=page_urls,
+        helper = Helper(core=self.core, constructor=Video)
+        async for scrape_result in helper.iterator(video_link_extractor=extractor_videos, target_page_urls=page_urls,
                                  max_video_concurrency=videos_concurrency, max_page_concurrency=pages_concurrency,
-                                         on_video_error=on_video_error, on_page_error=on_page_error,
-                                         keep_original_order=keep_original_order):
+                                 on_video_error=on_video_error, on_page_error=on_page_error,
+                                 keep_original_order=keep_original_order, fetch_html=load_html):
             yield scrape_result
+
+    async def login(self, username: str, password: str, cookies: dict | None = None) -> Account:
+        if cookies:
+            self.core.session.cookies.update(cookies)
+            return Account(self.core)
+
+        payload = [
+            {
+                "name": "authorizedUserModelSync",
+                "requestData": {
+                    "model": {
+                        "id": None,
+                        "$id": "c1a902b0-cb96-4098-89f9-2bd0010586aa",
+                        "modelName": "authorizedUserModel",
+                        "itemState": "unchanged"
+                    },
+                    "username": username,
+                    "password": password,
+                    "remember": 1,
+                    "redirectURL": "https://xhamster.com/login",
+                    "pageType": None,
+                    "source": None,
+                    "isSubscribedToUpdates": None,
+                    "trusted": True
+                }
+            }
+        ]
+
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "X-Requested-With": "XMLHttpRequest",  # Tells the server this is an AJAX/API fetch
+            "Origin": "https://xhamster.com",
+            "Referer": "https://xhamster.com/login",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+
+        response = await self.core.fetch(method="POST", url="https://xhamster.com/x-api", get_response=True,
+                                    json_data=payload, headers=headers)
+        if response.status_code == 200:
+            logger.info("Login Successful!")
+            return Account(core=self.core)
+
+
+        else:
+            logger.error("Login (probably) failed!")
+            raise LoginFailed("Login probably failed, because server did not return a 200 response code, please report this / check your credentials!")

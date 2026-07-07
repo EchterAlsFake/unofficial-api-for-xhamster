@@ -13,22 +13,21 @@ async def test_short():
     short = await client.get_short("https://xhamster.com/shorts/teen-jerks-pussy-shower-xhecgTc")
 
 
-    assert isinstance(short.title, str)
-    assert isinstance(short.author, str)
-    assert isinstance(short.likes, int)
-    assert isinstance(short.dislikes, int)
-    assert isinstance(short.views, int)
-    assert isinstance(short.comments, int)
-    assert isinstance(short.duration, int)
-    assert isinstance(short.video_id, int)
-    assert isinstance(short.created_at, int)
-    assert isinstance(short.tags, list)
-    assert isinstance(short.author_subscribers, int)
-    assert isinstance(short.author_logo, str)
-    assert isinstance(short.author_link, str)
-    assert isinstance(short.thumb_url, str)
-    assert isinstance(short.poster_url, str)
-    assert isinstance(short.m3u8_base_url, str)
+    assert isinstance(short.title, str) and len(short.title) > 1
+    assert isinstance(short.author, str) and len(short.author) > 1
+    assert isinstance(short.likes, int) and len(str(short.likes)) > 1
+    assert isinstance(short.views, int) and len(str(short.views)) > 1
+    assert isinstance(short.comment_count, int) and len(str(short.comment_count)) > 1
+    assert isinstance(short.duration, int) and len(str(short.duration)) > 1
+    assert isinstance(short.video_id, int) and len(str(short.video_id)) > 1
+    assert isinstance(short.created_at, int) and len(str(short.created_at)) > 1
+    assert isinstance(short.tags, list) and len(short.tags) > 1
+    assert isinstance(short.author_subscribers, int) and len(str(short.author_subscribers)) > 1
+    assert isinstance(short.author_logo, str) and len(short.author_logo) > 1
+    assert isinstance(short.author_link, str) and len(short.author_link) > 1
+    assert isinstance(short.thumbnail, str) and len(short.thumbnail) > 1
+    assert isinstance(short.poster_url, str) and len(short.poster_url) > 1
+    assert isinstance(short.m3u8_base_url, str) and len(short.m3u8_base_url) > 1
 
     config = DownloadConfigHLS(quality="best", return_report=True)
     result = await short.download(config)
