@@ -29,7 +29,7 @@ async def test_short():
     assert isinstance(short.poster_url, str) and len(short.poster_url) > 1
     assert isinstance(short.m3u8_base_url, str) and len(short.m3u8_base_url) > 1
 
-    config = DownloadConfigHLS(quality="best", return_report=True)
+    config = DownloadConfigHLS(quality="worst", return_report=True)
     result = await short.download(config)
     assert result.status == "completed"
 

@@ -1,17 +1,18 @@
 from __future__ import annotations
 import os
+import copy
 import urllib
 import logging
 import chompjs
 import asyncio
 
-from dataclasses import dataclass, field
 from urllib.parse import urlencode, quote
+from typing import Literal, AsyncGenerator
 from curl_cffi import AsyncSession, Response
 from selectolax.lexbor import LexborHTMLParser
+from dataclasses import dataclass, fields, field
 from base_api.modules.config import RuntimeConfig
 from base_api.modules.type_hints import DownloadReport
-from typing import Literal, AsyncGenerator
 from base_api import DownloadConfigHLS, ScrapeResult, BaseCore, Helper, BaseMedia
 from base_api.modules.errors import NetworkRequestError, BotProtectionDetected, UnknownError, InvalidProxy, ResourceGone
 
@@ -22,7 +23,8 @@ from xhamster_api.modules.consts import (build_page_url, headers, REGEX_AVATAR, 
 from xhamster_api.modules.type_hints import on_error_hint
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Xhamster API")
+logger.addHandler(logging.NullHandler())
 
 
 async def on_error(url: str, error: Exception, attempt: int) -> bool:
@@ -32,6 +34,7 @@ async def on_error(url: str, error: Exception, attempt: int) -> bool:
         return False
 
     return True
+
 
 async def get_html_content(core: BaseCore, url: str) -> str | None | dict:
     logger.debug(f"Fetching HTML content for URL: {url}")
@@ -66,7 +69,7 @@ class Something(BaseMedia):
     videos_count: str | None = None
     total_views_count: str | None = None
     avatar_url: str | None = None
-    pornstar_creator_information: dict | None = None
+    pornstar_information: dict | None = None
 
     # You don't need that
     _is_pornstar_or_creator: bool = False
@@ -79,12 +82,10 @@ class Something(BaseMedia):
         html_content = await get_html_content(url=self.url, core=self.core)
         assert isinstance(html_content, str)
         data: dict = await asyncio.to_thread(self._extract_data, html_content)
-        self.name = data.get("name")
-        self.subscribers_count = data.get("subscribers_count")
-        self.videos_count = data.get("videos_count")
-        self.total_views_count = data.get("total_views_count")
-        self.avatar_url = data.get("avatar_url")
-        self.pornstar_creator_information = data.get("pornstar_information", None)
+        allowed_fields = {field.name for field in fields(self)}
+        for key, value in data.items():
+            if key in allowed_fields:
+                setattr(self, key, value)
 
     def _extract_data(self, html_content: str) -> dict:
         parser = LexborHTMLParser(html_content)
@@ -256,21 +257,10 @@ class Short(BaseMedia):
         html_content = await get_html_content(core=self.core, url=self.url)
         assert isinstance(html_content, str)
         data: dict = await asyncio.to_thread(self._extract_data, html_content)
-        self.title = data.get("title")
-        self.author = data.get("author")
-        self.likes = data.get("likes")
-        self.views = data.get("views")
-        self.comment_count = data.get("comments")
-        self.duration = data.get("duration")
-        self.video_id = data.get("video_id")
-        self.created_at = data.get("created_at")
-        self.tags = data.get("tags")
-        self.author_subscribers = data.get("subscribers")
-        self.author_logo = data.get("author_logo")
-        self.author_link = data.get("author_link")
-        self.thumbnail = data.get("thumb_url")
-        self.poster_url = data.get("poster_url")
-        self.m3u8_base_url = data.get("m3u8_base_url")
+        allowed_fields = {field.name for field in fields(self)}
+        for key, value in data.items():
+            if key in allowed_fields:
+                setattr(self, key, value)
 
     @staticmethod
     def _extract_data(html_content: str) -> dict:
@@ -305,15 +295,15 @@ class Short(BaseMedia):
             "author": author,
             "likes": likes,
             "views": views,
-            "comments": comments,
+            "comment_count": comments,
             "duration": duration,
             "video_id": video_id,
             "created_at": created,
             "tags": tags,
-            "subscribers": subscribers,
+            "author_subscribers": subscribers,
             "author_logo": author_logo,
             "author_link": author_link,
-            "thumb_url": thumb_url,
+            "thumbnail": thumb_url,
             "poster_url": poster_url,
             "m3u8_base_url": m3u8_base_url
         }
@@ -323,7 +313,7 @@ class Short(BaseMedia):
         :param configuration:
         :return:
         """
-        config = configuration
+        config = copy.deepcopy(configuration)
 
         if not config.no_title:
             config.path = os.path.join(config.path, f"{self.title}.mp4")
@@ -336,7 +326,6 @@ class Short(BaseMedia):
 
         except Exception as e:
             raise DownloadFailed(str(e))
-
 
 
 @dataclass(slots=True, kw_only=True)
@@ -369,18 +358,9 @@ class Video(BaseMedia):
         html_content = await get_html_content(core=self.core, url=self.url)
         assert isinstance(html_content, str)
         data: dict = await asyncio.to_thread(self._extract_html, html_content)
-        self.video_id = data.get("video_id")
-        self.title = data.get("title")
-        self.rating_percentage = data.get("rating_percentage")
-        self.likes = data.get("likes")
-        self.dislikes = data.get("dislikes")
-        self.uploader_name = data.get("uploader_name")
-        self.uploader_subscribers = data.get("uploader_subscribers")
-        self.tags = data.get("tags")
-        self.categories = data.get("categories")
-        self.pornstars = data.get("pornstars")
-        self.thumbnail = data.get("thumbnail")
-        self.m3u8_base_url = data.get("m3u8_base_url")
+        allowed_fields = {field.name for field in fields(self)}
+        for key, value in data.items():
+            setattr(self, key, value)
 
     @staticmethod
     def _extract_html(html_content) -> dict:
@@ -453,7 +433,7 @@ class Video(BaseMedia):
         :param configuration:
         :return:
         """
-        config = configuration
+        config = copy.deepcopy(configuration)
         if not config.no_title:
             config.path = os.path.join(config.path, f"{self.title}.mp4")
 

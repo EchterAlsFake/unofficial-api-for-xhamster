@@ -11,7 +11,7 @@ async def test_creator():
     assert isinstance(creator.videos_count, str) and len(creator.videos_count) > 1
     assert isinstance(creator.total_views_count, str) and len(creator.total_views_count) > 1
     assert isinstance(creator.avatar_url, str) and len(creator.avatar_url) > 1
-    assert isinstance(creator.pornstar_creator_information, dict) and len(creator.pornstar_creator_information.keys()) > 1
+    assert isinstance(creator.pornstar_information, dict) and len(creator.pornstar_information.keys()) > 1
 
     idx = 0
     async for result in creator.videos():

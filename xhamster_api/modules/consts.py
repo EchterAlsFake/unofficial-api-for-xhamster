@@ -27,6 +27,9 @@ def extractor_videos(html_content: str) -> list[dict[str, str]]:
     if not videos:
         videos = parser.css_first('div[data-role="favorites-video-collections"]')
 
+    if not videos:
+        videos = parser.css_first('div[data-role="video-section-container"]')
+
     for video in videos.css("div.video-thumb"):
         video_id = video.attributes.get("data-video-id")
 

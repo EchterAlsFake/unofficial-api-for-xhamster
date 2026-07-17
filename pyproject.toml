@@ -32,7 +32,7 @@ dependencies = [
     "chompjs",
     "eaf-base-api",
     "m3u8",
-    "curl_cffi"
+    "curl_cffi",
 ]
 
 classifiers = [

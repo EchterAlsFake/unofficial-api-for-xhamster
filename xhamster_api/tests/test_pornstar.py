@@ -11,7 +11,7 @@ async def test_pornstar():
     assert isinstance(pornstar.videos_count, str) and len(pornstar.videos_count) > 1
     assert isinstance(pornstar.total_views_count, str) and len(pornstar.total_views_count) > 1
     assert isinstance(pornstar.avatar_url, str) and len(pornstar.avatar_url) > 1
-    assert isinstance(pornstar.pornstar_creator_information, dict) and len(pornstar.pornstar_creator_information.keys()) > 0
+    assert isinstance(pornstar.pornstar_information, dict) and len(pornstar.pornstar_information.keys()) > 0
 
     idx = 0
     async for result in pornstar.videos():
