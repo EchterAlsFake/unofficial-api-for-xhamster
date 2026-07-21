@@ -450,6 +450,7 @@ class Video(BaseMedia):
 class Client:
     def __init__(self, core: BaseCore = BaseCore(RuntimeConfig())):
         self.core = core
+        self.account = None
         self.core.initialize_session()
         assert isinstance(self.core.session, AsyncSession)
         self.core.session.headers.update(headers)
@@ -581,8 +582,8 @@ class Client:
                                     json_data=payload, headers=headers)
         if response.status_code == 200:
             logger.info("Login Successful!")
+            self.account = Account(core=self.core)
             return Account(core=self.core)
-
 
         else:
             logger.error("Login (probably) failed!")
