@@ -30,7 +30,7 @@ keywords = [
 dependencies = [
     "selectolax",
     "chompjs",
-    "eaf-base-api",
+    "eaf-base-api>=4.0.0",
     "m3u8",
     "curl_cffi",
 ]

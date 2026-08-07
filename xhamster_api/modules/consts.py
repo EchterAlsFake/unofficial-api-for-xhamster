@@ -42,6 +42,9 @@ def extractor_videos(html_content: str) -> list[dict[str, str]]:
         else:
             url = preview_video = title = None
 
+        if not isinstance(url, str) or not url:
+            continue
+
         # 2. Extract Length/Duration safely
         length_el = video.css_first('[data-role="video-duration"]')
         length = length_el.text(strip=True) if length_el else "N/A"
@@ -78,6 +81,8 @@ def extractor_shorts(html_content: str) -> list[dict[str, str]]:
 
         a_tag = video.css_first("a")
         url = a_tag.attributes.get("href")
+        if not isinstance(url, str) or not url:
+            continue
         preview_video = a_tag.attributes.get("data-previewvideo")
 
         img_tag = video.css_first("img")
@@ -107,4 +112,3 @@ def build_page_url(url: str, is_search: bool, idx: int) -> str:
         return url
 
     return f"{url}/{idx}"
-
