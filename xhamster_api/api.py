@@ -11,19 +11,17 @@ from typing import ClassVar, Literal, AsyncGenerator
 from curl_cffi import AsyncSession
 from selectolax.lexbor import LexborHTMLParser
 from dataclasses import dataclass, field
-from base_api.modules.config import RuntimeConfig
+from base_api.modules.config import IteratorConfig, RuntimeConfig
 from base_api.modules.type_hints import DownloadReport
 from base_api import (
     BaseCore,
     BaseMedia,
     DownloadConfigHLS,
     ErrorAction,
-    ErrorHandler,
     ErrorMode,
     Helper,
     MediaLoadError,
     MediaLoadErrors,
-    ResultOrder,
     RetryPolicy,
     ScrapeErrorContext,
     ScrapeResult,
@@ -49,6 +47,23 @@ logger.addHandler(logging.NullHandler())
 
 
 HELPER_RETRY = RetryPolicy(max_attempts=4, base_delay=0.5, max_delay=8.0)
+
+
+def make_iterator_config(
+    *,
+    max_item_concurrency: int | None = None,
+    max_page_concurrency: int | None = None,
+) -> IteratorConfig:
+    return IteratorConfig(
+        max_item_concurrency=max_item_concurrency,
+        max_page_concurrency=max_page_concurrency,
+        load_specific_sources=("html",),
+        item_retry=HELPER_RETRY,
+        page_retry=HELPER_RETRY,
+        page_error_mode=ErrorMode.SKIP,
+        item_error_handler=None,
+        page_error_handler=None,
+    )
 
 
 def _is_resource_gone(error: BaseException) -> bool:
@@ -158,42 +173,31 @@ class Something(BaseMedia):
         }
 
 
-    async def videos(self, pages: int = 2, videos_concurrency: int | None = None, pages_concurrency: int | None = None,
-                     on_video_error: ErrorHandler | None = on_error,
-                     on_page_error: ErrorHandler | None = None,
-                     keep_original_order: bool = False,
-                     load_html: bool = False,
-                     ) -> AsyncGenerator[ScrapeResult, None]:
+    async def videos(
+        self,
+        pages: int = 2,
+        iterator_config: IteratorConfig | None = None,
+    ) -> AsyncGenerator[ScrapeResult, None]:
         helper = Helper(core=self.core, constructor=Video)
         page_urls = [build_page_url(url=self.url, is_search=False, idx=page) for page in range(1, pages + 1)]
-        videos_concurrency = videos_concurrency or self.core.configuration.videos_concurrency
-        pages_concurrency = pages_concurrency or self.core.configuration.pages_concurrency
-        assert videos_concurrency and pages_concurrency
+        if iterator_config is None:
+            iterator_config = make_iterator_config()
 
         stream = helper.iterator(
             item_extractor=extractor_videos,
-            max_item_concurrency=videos_concurrency,
-            max_page_concurrency=pages_concurrency,
-            item_error_handler=on_video_error,
-            page_error_handler=on_page_error,
             target_page_urls=page_urls,
-            item_retry=HELPER_RETRY,
-            page_retry=HELPER_RETRY,
-            page_error_mode=ErrorMode.SKIP,
-            order=ResultOrder.ORIGINAL if keep_original_order else ResultOrder.COMPLETION,
-            load_sources=("html",) if load_html else (),
+            iterator_config=iterator_config,
         )
         async with stream:
             async for scrape_result in stream:
                 yield scrape_result
 
 
-    async def get_shorts(self, pages: int = 2, videos_concurrency: int = 2, pages_concurrency: int = 1,
-                         on_video_error: ErrorHandler | None = on_error,
-                         on_page_error: ErrorHandler | None = None,
-                         keep_original_order: bool = False,
-                         load_html: bool = False
-                         ) -> AsyncGenerator[ScrapeResult, None]:
+    async def get_shorts(
+        self,
+        pages: int = 2,
+        iterator_config: IteratorConfig | None = None,
+    ) -> AsyncGenerator[ScrapeResult, None]:
         url = self.url
 
         if not url.endswith("/"):
@@ -202,18 +206,17 @@ class Something(BaseMedia):
         url += "shorts"
         page_urls = [build_page_url(url, is_search=False, idx=page) for page in range(1, pages + 1)]
         helper = Helper(core=self.core, constructor=Short)
+
+        if iterator_config is None:
+            iterator_config = make_iterator_config(
+                max_item_concurrency=2,
+                max_page_concurrency=1,
+            )
+
         stream = helper.iterator(
             item_extractor=extractor_shorts,
-            load_sources=("html",) if load_html else (),
             target_page_urls=page_urls,
-            max_item_concurrency=videos_concurrency,
-            max_page_concurrency=pages_concurrency,
-            item_error_handler=on_video_error,
-            page_error_handler=on_page_error,
-            item_retry=HELPER_RETRY,
-            page_retry=HELPER_RETRY,
-            page_error_mode=ErrorMode.SKIP,
-            order=ResultOrder.ORIGINAL if keep_original_order else ResultOrder.COMPLETION,
+            iterator_config=iterator_config,
         )
         async with stream:
             async for scrape_result in stream:
@@ -238,59 +241,40 @@ class Account:
     def __init__(self, core: BaseCore):
         self.core = core
 
-    async def get_liked_videos(self, pages: int = 2, videos_concurrency: int | None = None, pages_concurrency: int | None = None,
-                     on_video_error: ErrorHandler | None = on_error,
-                     on_page_error: ErrorHandler | None = None,
-                     keep_original_order: bool = False,
-                     load_html: bool = False,
-                     ) -> AsyncGenerator[ScrapeResult, None]:
+    async def get_liked_videos(
+        self,
+        pages: int = 2,
+        iterator_config: IteratorConfig | None = None,
+    ) -> AsyncGenerator[ScrapeResult, None]:
         helper = Helper(core=self.core, constructor=Video)
         page_urls = [f"https://xhamster.com/my/liked/videos?page={page}" for page in range(1, pages + 1)]
-        videos_concurrency = videos_concurrency or self.core.configuration.videos_concurrency
-        pages_concurrency = pages_concurrency or self.core.configuration.pages_concurrency
-        assert videos_concurrency and pages_concurrency
+        if iterator_config is None:
+            iterator_config = make_iterator_config()
 
         stream = helper.iterator(
             item_extractor=extractor_videos,
-            max_item_concurrency=videos_concurrency,
-            max_page_concurrency=pages_concurrency,
-            item_error_handler=on_video_error,
-            page_error_handler=on_page_error,
             target_page_urls=page_urls,
-            item_retry=HELPER_RETRY,
-            page_retry=HELPER_RETRY,
-            page_error_mode=ErrorMode.SKIP,
-            order=ResultOrder.ORIGINAL if keep_original_order else ResultOrder.COMPLETION,
-            load_sources=("html",) if load_html else (),
+            iterator_config=iterator_config,
         )
         async with stream:
             async for scrape_result in stream:
                 yield scrape_result
 
-    async def get_account_playlist(self, url: str, pages: int = 2, videos_concurrency: int | None = None,
-                               pages_concurrency: int | None = None,
-                               on_video_error: ErrorHandler | None = on_error,
-                               on_page_error: ErrorHandler | None = None,
-                               keep_original_order: bool = False,
-                               load_html: bool = False) -> AsyncGenerator[ScrapeResult, None]:
+    async def get_account_playlist(
+        self,
+        url: str,
+        pages: int = 2,
+        iterator_config: IteratorConfig | None = None,
+    ) -> AsyncGenerator[ScrapeResult, None]:
         helper = Helper(core=self.core, constructor=Video)
         page_urls = [f"{url}?page={page}" for page in range(1, pages + 1)]
-        videos_concurrency = videos_concurrency or self.core.configuration.videos_concurrency
-        pages_concurrency = pages_concurrency or self.core.configuration.pages_concurrency
-        assert videos_concurrency and pages_concurrency
+        if iterator_config is None:
+            iterator_config = make_iterator_config()
 
         stream = helper.iterator(
             item_extractor=extractor_videos,
-            max_item_concurrency=videos_concurrency,
-            max_page_concurrency=pages_concurrency,
-            item_error_handler=on_video_error,
-            page_error_handler=on_page_error,
             target_page_urls=page_urls,
-            item_retry=HELPER_RETRY,
-            page_retry=HELPER_RETRY,
-            page_error_mode=ErrorMode.SKIP,
-            order=ResultOrder.ORIGINAL if keep_original_order else ResultOrder.COMPLETION,
-            load_sources=("html",) if load_html else (),
+            iterator_config=iterator_config,
         )
         async with stream:
             async for scrape_result in stream:
@@ -558,18 +542,12 @@ class Client:
         date: Literal["latest", "weekly", "monthly", "yearly"] | None = None,
         production: Literal["studios", "creators"] | None = None,
         fps: Literal["30", "60"] | None = None,
-        pages: int = 2, videos_concurrency: int | None = None, pages_concurrency: int | None = None,
-                            on_video_error: ErrorHandler | None = on_error,
-                            on_page_error: ErrorHandler | None = None,
-                            keep_original_order: bool = False,
-                            load_html: bool = False,
+        pages: int = 2,
+        iterator_config: IteratorConfig | None = None,
                             ) -> AsyncGenerator[ScrapeResult, None]:
         path = quote(str(query), safe="")  # e.g. "4k cats & dogs" -> "4k%20cats%20%26%20dogs"
         base = f"https://xhamster.com/search/"
         url = base + path
-
-        videos_concurrency = videos_concurrency or self.core.configuration.videos_concurrency
-        pages_concurrency = pages_concurrency or self.core.configuration.pages_concurrency
 
         params = {}
 
@@ -603,21 +581,15 @@ class Client:
         query_string = urlencode(params, doseq=True)
         final_url = f"{url}?{query_string}" if query_string else url
         page_urls = [build_page_url(url=final_url, is_search=True, idx=page) for page in range(1, pages + 1)]
-        assert isinstance(videos_concurrency, int)
-        assert isinstance(pages_concurrency, int)
         helper = Helper(core=self.core, constructor=Video)
+
+        if iterator_config is None:
+            iterator_config = make_iterator_config()
+
         stream = helper.iterator(
             item_extractor=extractor_videos,
             target_page_urls=page_urls,
-            max_item_concurrency=videos_concurrency,
-            max_page_concurrency=pages_concurrency,
-            item_error_handler=on_video_error,
-            page_error_handler=on_page_error,
-            item_retry=HELPER_RETRY,
-            page_retry=HELPER_RETRY,
-            page_error_mode=ErrorMode.SKIP,
-            order=ResultOrder.ORIGINAL if keep_original_order else ResultOrder.COMPLETION,
-            load_sources=("html",) if load_html else (),
+            iterator_config=iterator_config,
         )
         async with stream:
             async for scrape_result in stream:
