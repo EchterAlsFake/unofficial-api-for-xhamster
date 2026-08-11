@@ -46,9 +46,6 @@ logger = logging.getLogger("Xhamster API")
 logger.addHandler(logging.NullHandler())
 
 
-HELPER_RETRY = RetryPolicy(max_attempts=4, base_delay=0.5, max_delay=8.0)
-
-
 def make_iterator_config(
     *,
     max_item_concurrency: int | None = None,
@@ -58,8 +55,8 @@ def make_iterator_config(
         max_item_concurrency=max_item_concurrency,
         max_page_concurrency=max_page_concurrency,
         load_specific_sources=("html",),
-        item_retry=HELPER_RETRY,
-        page_retry=HELPER_RETRY,
+        item_retry=None,
+        page_retry=None,
         page_error_mode=ErrorMode.SKIP,
         item_error_handler=None,
         page_error_handler=None,
@@ -140,7 +137,7 @@ class Something(BaseMedia):
             name = parser.css_first("h2.h3-bold-8643e.primary-8643e.landing-info__user-title").text(strip=True)
 
         else:
-            name = parser.css_first("h1.h3-bold-8643e.primary-8643e.landing-info__user-title").text(strip=True)
+            name = parser.css_first("p.h3-bold-8643e.primary-8643e.landing-info__user-title").text(strip=True)
 
         subscribers_count = parser.css_first("div.body-8643e.primary-8643e.landing-info__metric-value").text(strip=True)
         videos_count = parser.css("div.body-8643e.primary-8643e.landing-info__metric-value")[1].text(strip=True)
@@ -177,7 +174,7 @@ class Something(BaseMedia):
         self,
         pages: int = 2,
         iterator_config: IteratorConfig | None = None,
-    ) -> AsyncGenerator[ScrapeResult, None]:
+    ) -> AsyncGenerator[ScrapeResult[Video], None]:
         helper = Helper(core=self.core, constructor=Video)
         page_urls = [build_page_url(url=self.url, is_search=False, idx=page) for page in range(1, pages + 1)]
         if iterator_config is None:
@@ -185,36 +182,6 @@ class Something(BaseMedia):
 
         stream = helper.iterator(
             item_extractor=extractor_videos,
-            target_page_urls=page_urls,
-            iterator_config=iterator_config,
-        )
-        async with stream:
-            async for scrape_result in stream:
-                yield scrape_result
-
-
-    async def get_shorts(
-        self,
-        pages: int = 2,
-        iterator_config: IteratorConfig | None = None,
-    ) -> AsyncGenerator[ScrapeResult, None]:
-        url = self.url
-
-        if not url.endswith("/"):
-            url += "/"
-
-        url += "shorts"
-        page_urls = [build_page_url(url, is_search=False, idx=page) for page in range(1, pages + 1)]
-        helper = Helper(core=self.core, constructor=Short)
-
-        if iterator_config is None:
-            iterator_config = make_iterator_config(
-                max_item_concurrency=2,
-                max_page_concurrency=1,
-            )
-
-        stream = helper.iterator(
-            item_extractor=extractor_shorts,
             target_page_urls=page_urls,
             iterator_config=iterator_config,
         )
@@ -231,10 +198,62 @@ class Channel(Something):
 class Pornstar(Something):
     _is_pornstar_or_creator: bool = field(default=True, init=False)
 
+    async def get_shorts(
+            self,
+            pages: int = 2,
+            iterator_config: IteratorConfig | None = None,
+    ) -> AsyncGenerator[ScrapeResult[Short], None]:
+        url = self.url
+
+        if not url.endswith("/"):
+            url += "/"
+
+        url += "shorts"
+        page_urls = [build_page_url(url, is_search=False, idx=page) for page in range(1, pages + 1)]
+        helper = Helper(core=self.core, constructor=Short)
+
+        if iterator_config is None:
+            iterator_config = make_iterator_config()
+
+        stream = helper.iterator(
+            item_extractor=extractor_shorts,
+            target_page_urls=page_urls,
+            iterator_config=iterator_config,
+        )
+        async with stream:
+            async for scrape_result in stream:
+                yield scrape_result
+
 
 @dataclass(kw_only=True, slots=True)
 class Creator(Something):
     _is_pornstar_or_creator: bool = field(default=True, init=False)
+
+    async def get_shorts(
+            self,
+            pages: int = 2,
+            iterator_config: IteratorConfig | None = None,
+    ) -> AsyncGenerator[ScrapeResult[Short], None]:
+        url = self.url
+
+        if not url.endswith("/"):
+            url += "/"
+
+        url += "shorts"
+        page_urls = [build_page_url(url, is_search=False, idx=page) for page in range(1, pages + 1)]
+        helper = Helper(core=self.core, constructor=Short)
+
+        if iterator_config is None:
+            iterator_config = make_iterator_config()
+
+        stream = helper.iterator(
+            item_extractor=extractor_shorts,
+            target_page_urls=page_urls,
+            iterator_config=iterator_config,
+        )
+        async with stream:
+            async for scrape_result in stream:
+                yield scrape_result
 
 
 class Account:
@@ -245,7 +264,7 @@ class Account:
         self,
         pages: int = 2,
         iterator_config: IteratorConfig | None = None,
-    ) -> AsyncGenerator[ScrapeResult, None]:
+    ) -> AsyncGenerator[ScrapeResult[Video], None]:
         helper = Helper(core=self.core, constructor=Video)
         page_urls = [f"https://xhamster.com/my/liked/videos?page={page}" for page in range(1, pages + 1)]
         if iterator_config is None:
@@ -265,7 +284,7 @@ class Account:
         url: str,
         pages: int = 2,
         iterator_config: IteratorConfig | None = None,
-    ) -> AsyncGenerator[ScrapeResult, None]:
+    ) -> AsyncGenerator[ScrapeResult[Video], None]:
         helper = Helper(core=self.core, constructor=Video)
         page_urls = [f"{url}?page={page}" for page in range(1, pages + 1)]
         if iterator_config is None:
@@ -544,7 +563,7 @@ class Client:
         fps: Literal["30", "60"] | None = None,
         pages: int = 2,
         iterator_config: IteratorConfig | None = None,
-                            ) -> AsyncGenerator[ScrapeResult, None]:
+                            ) -> AsyncGenerator[ScrapeResult[Video], None]:
         path = quote(str(query), safe="")  # e.g. "4k cats & dogs" -> "4k%20cats%20%26%20dogs"
         base = f"https://xhamster.com/search/"
         url = base + path

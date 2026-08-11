@@ -30,7 +30,12 @@ def extractor_videos(html_content: str) -> list[dict[str, str]]:
     if not videos:
         videos = parser.css_first('div[data-role="video-section-container"]')
 
-    for video in videos.css("div.video-thumb"):
+    if not videos:
+        videos = parser.css_first('div[data-role="main-search-content"]')
+
+    _videos = videos.css("div.mixed-section.index-videos")
+
+    for video in _videos:
         video_id = video.attributes.get("data-video-id")
 
         # 1. Extract Video Metadata from the <a> tag
