@@ -66,7 +66,7 @@ def extractor_videos(html_content: str) -> list[dict[str, str]]:
         # Append the structured data
         stuff.append({
             "title": title,
-            "length": length,
+            "duration": length,
             "video_id": video_id,
             "url": url,
             "preview_video": preview_video,

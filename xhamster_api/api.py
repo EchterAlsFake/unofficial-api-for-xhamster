@@ -412,11 +412,21 @@ class Video(BaseMedia):
     pornstars: list[str] | None = media_field("html")
     thumbnail: str | None = media_field("html")
     m3u8_base_url: str | None = media_field("html")
+    video_hash: str | None = media_field("html")
+    description: str | None = media_field("html")
+    duration: int | None = media_field("html")
+    views: int | None = media_field("html")
+    comments_count: int | None = media_field("html")
+    created_timestamp: str | None = media_field("html")
+    date_ago: str | None = media_field("html")
+    is_vr: bool | None = media_field("html")
+    is_hd: bool | None = media_field("html")
+    max_resolution: str | None = media_field("html")
+    orientation: str | None = media_field("html")
+    preview_thumbnail: str | None = media_field("html")
 
     # Optional
-    length: str | None = None
     preview_video: str | None = None
-    views: str | None = None
 
     loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
 
@@ -427,66 +437,117 @@ class Video(BaseMedia):
     @staticmethod
     def _extract_html(html_content) -> dict:
         lexbor = LexborHTMLParser(html_content)
-        script = lexbor.css_first("script#initials-script").text()
-        json_text = script.split("window.initials=", 1)[-1].strip().rstrip(";")
+        script = lexbor.css_first("script#initials-script")
+
+        if not script:
+            return {}
+
+        json_text = script.text().split("window.initials=", 1)[-1].strip().rstrip(";")
         data = chompjs.parse_js_object(json_text)
-        video_id = data.get("videoTagsComponent", {}).get("videoId")
-        title = None
-        data_url = data.get("bannerUnderComments", {}).get("fh", {}).get("dataUrl", "")
-        if data_url:
-            parsed_url = urllib.parse.urlparse(data_url)
-            query_params = urllib.parse.parse_qs(parsed_url.query)
-            titles = query_params.get("videoTitle", [])
-            if titles:
-                title = urllib.parse.unquote_plus(titles[0])
 
-        rating_percentage = data.get("ratingComponent", {}).get("ratingModel", {}).get("value", 0)
-        likes = data.get("ratingComponent", {}).get("ratingModel", {}).get("likes", 0)
-        dislikes = data.get("ratingComponent", {}).get("ratingModel", {}).get("dislikes", 0)
-        _uploader_tag_model = {}
+        # Set up base dictionary paths
+        video_entity = data.get("videoEntity", {})
+        video_model = data.get("videoModel", {})
+        tags_component = data.get("videoTagsComponent", {}).get("tags", [])
 
-        _tags = data.get("videoTagsComponent", {}).get("tags", [])
-        for tag in _tags:
-            if tag.get("isUser"):
-                _uploader_tag_model = tag
+        # 1. Core Identity
+        video_id = video_entity.get("id") or video_model.get("id")
+        video_hash = video_entity.get("idHashSlug") or video_model.get("idHashSlug")
+        title = video_entity.get("title") or video_model.get("title")
+        description = video_entity.get("description") or video_model.get("description")
 
-        uploader_name = _uploader_tag_model.get("name", "")
+        # 2. Metadata & Metrics
+        duration = video_entity.get("duration") or video_model.get("duration", 0)
+        views = video_entity.get("views") or video_model.get("views", 0)
+        comments_count = video_entity.get("commentsCount") or video_model.get("comments", 0)
+        created_timestamp = video_model.get("created")
+        date_ago = video_entity.get("dateAgo")
+
+        # 3. Ratings
+        rating_model = video_entity.get("rating", {})
+        rating_percentage = rating_model.get("value", 0)
+        likes = rating_model.get("likes", 0)
+        dislikes = rating_model.get("dislikes", 0)
+
+        # 4. Technical Specs
+        is_vr = video_entity.get("isVr", False)
+        is_hd = video_model.get("isHD", False)
+        max_resolution = video_entity.get("maxResolution")
+        orientation = video_entity.get("orientation")  # e.g., 'straight', 'gay'
+
+        # 5. Taxonomy loop
+        categories = []
+        tags = []
+        pornstars = []
+        uploader_name = video_model.get("author", {}).get("name")
+        uploader_subscribers = 0
+
+        for tag in tags_component:
+            tag_name = tag.get("name")
+            if not tag_name:
+                continue
+
+            if tag.get("isCategory"):
+                categories.append(tag_name)
+            elif tag.get("isTag"):
+                tags.append(tag_name)
+            elif tag.get("isPornstar"):
+                pornstars.append(tag_name)
+            elif tag.get("isUser") or tag.get("isChannel"):
+                if not uploader_name:
+                    uploader_name = tag_name
+
+                sub_model = tag.get("subscriptionModel") or {}
+                if "subscribers" in sub_model:
+                    uploader_subscribers = sub_model["subscribers"]
+
+        # Fallbacks for arrays/uploader
+        if not pornstars:
+            pornstars = [p.get("name") for p in video_entity.get("pornstarModels", []) if p.get("name")]
 
         if not uploader_name:
-            uploader_name = lexbor.css_first("div.item-50dd2").css_first("span.body-bold-8643e.label-5984a.label-96c3e").text(strip=True)
+            uploader_elem = lexbor.css_first("div.item-50dd2 span.body-bold-8643e.label-5984a.label-96c3e")
+            if uploader_elem:
+                uploader_name = uploader_elem.text(strip=True)
 
-        sub_model = _uploader_tag_model.get("subscriptionModel") or {}
-        uploader_subscribers = sub_model.get("subscribers", 0)
-        categories = [tag["name"] for tag in _tags if tag.get("isCategory") and "name" in tag]
+        # 6. Media Links
+        thumbnail = video_model.get("thumbURL") or video_entity.get("thumbBig")
+        if not thumbnail:
+            thumb_match = REGEX_THUMBNAIL.search(html_content)
+            thumbnail = thumb_match.group(1) if thumb_match else ""
 
-        tags = [tag["name"] for tag in _tags if tag.get("isTag") and "name" in tag]
+        # Often a sprite/GIF preview URL, highly useful for front-end clients
+        preview_thumbnail = video_model.get("previewThumbURL")
 
-        container = lexbor.css_first("div[data-role='video-tags-list']")
-
-        actor_elements = container.css('a[href*="/pornstars/"], a[href*="/creators/"]')
-
-        pornstars = []
-        for element in actor_elements:
-            name = element.text(strip=True)
-            pornstars.append(name)
-
-
-        thumbnail = REGEX_THUMBNAIL.search(html_content).group(1)
-        _url = REGEX_M3U8.search(html_content).group(0)
-        m3u8_base_url = _url.replace("\\/", "/")  # Fixing escaped slashes
+        m3u8_base_url = ""
+        m3u8_match = REGEX_M3U8.search(html_content)
+        if m3u8_match:
+            m3u8_base_url = m3u8_match.group(0).replace("\\/", "/")
 
         return {
             "video_id": video_id,
+            "video_hash": video_hash,
             "title": title,
+            "description": description,
+            "duration": duration,
+            "views": views,
+            "comments_count": comments_count,
+            "created_timestamp": created_timestamp,
+            "date_ago": date_ago,
             "rating_percentage": rating_percentage,
             "likes": likes,
             "dislikes": dislikes,
+            "is_vr": is_vr,
+            "is_hd": is_hd,
+            "max_resolution": max_resolution,
+            "orientation": orientation,
             "uploader_name": uploader_name,
             "uploader_subscribers": uploader_subscribers,
             "categories": categories,
             "tags": tags,
             "pornstars": pornstars,
             "thumbnail": thumbnail,
+            "preview_thumbnail": preview_thumbnail,
             "m3u8_base_url": m3u8_base_url
         }
 
