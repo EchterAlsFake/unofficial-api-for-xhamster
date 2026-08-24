@@ -20,61 +20,75 @@ def extractor_videos(html_content: str) -> list[dict[str, str]]:
     parser = LexborHTMLParser(html_content)
     stuff = []
 
-    videos = parser.css_first('div[data-role="video-section-content-role"]')
-    if not videos:
-        videos = parser.css_first("div.tabsAndLists-d9218")
+    # FIX 1: The site now renders MULTIPLE candidate containers on search
+    # pages — an empty placeholder div[data-role="main-search-content"]
+    # appears BEFORE the real one containing results. The old code used
+    # css_first(), which always grabbed the empty placeholder and returned
+    # zero items. Collect ALL matches across every known selector instead.
+    containers: list = []
+    for selector in (
+        'div[data-role="video-section-content-role"]',
+        "div.tabsAndLists-d9218",
+        'div[data-role="favorites-video-collections"]',
+        'div[data-role="video-section-container"]',
+        'div[data-role="main-search-content"]',
+    ):
+        containers.extend(parser.css(selector))
 
-    if not videos:
-        videos = parser.css_first('div[data-role="favorites-video-collections"]')
+    # Dedupe guard: overlapping containers could yield the same video twice.
+    seen_ids = set()
+    for videos in containers:
+        # FIX 2: data-video-id has MOVED. It used to live on the
+        # div.mixed-section.index-videos wrapper; the site now puts it on
+        # each individual .video-thumb node inside that wrapper. Iterating
+        # the wrapper meant video_id was None for every entry, so all
+        # videos were silently skipped.
+        _videos = videos.css(".video-thumb[data-video-id]")
 
-    if not videos:
-        videos = parser.css_first('div[data-role="video-section-container"]')
+        for video in _videos:
+            video_id = video.attributes.get("data-video-id")
+            if not video_id or video_id in seen_ids:
+                continue
 
-    if not videos:
-        videos = parser.css_first('div[data-role="main-search-content"]')
+            # 1. Extract Video Metadata from the <a> tag
+            a_tag = video.css_first('a[data-role="thumb-link"]')
+            if a_tag:
+                url = a_tag.attributes.get("href")
+                preview_video = a_tag.attributes.get("data-previewvideo")
+                title = a_tag.attributes.get("aria-label")
+            else:
+                url = preview_video = title = None
 
-    _videos = videos.css("div.mixed-section.index-videos")
+            if not isinstance(url, str) or not url:
+                continue
 
-    for video in _videos:
-        video_id = video.attributes.get("data-video-id")
+            seen_ids.add(video_id)
 
-        # 1. Extract Video Metadata from the <a> tag
-        a_tag = video.css_first('a[data-role="thumb-link"]')
-        if a_tag:
-            url = a_tag.attributes.get("href")
-            preview_video = a_tag.attributes.get("data-previewvideo")
-            title = a_tag.attributes.get("aria-label")
-        else:
-            url = preview_video = title = None
+            # 2. Extract Length/Duration safely
+            length_el = video.css_first('[data-role="video-duration"]')
+            length = length_el.text(strip=True) if length_el else "N/A"
 
-        if not isinstance(url, str) or not url:
-            continue
+            # 3. Extract Thumbnail
+            img_tag = video.css_first('img[data-role="thumb-preview-img"]')
+            thumbnail = img_tag.attributes.get("src") if img_tag else None
 
-        # 2. Extract Length/Duration safely
-        length_el = video.css_first('[data-role="video-duration"]')
-        length = length_el.text(strip=True) if length_el else "N/A"
+            # 4. Extract Views (Falls back to looking inside the metadata container)
+            views_el = video.css_first("div.video-thumb-views")
+            views = views_el.text(strip=True) if views_el else "0 views"
 
-
-        # 3. Extract Thumbnail
-        img_tag = video.css_first('img[data-role="thumb-preview-img"]')
-        thumbnail = img_tag.attributes.get("src") if img_tag else None
-
-        # 4. Extract Views (Falls back to looking inside the metadata container)
-        views_el = video.css_first("div.video-thumb-views")
-        views = views_el.text(strip=True) if views_el else "0 views"
-
-        # Append the structured data
-        stuff.append({
-            "title": title,
-            "duration": length,
-            "video_id": video_id,
-            "url": url,
-            "preview_video": preview_video,
-            "thumbnail": thumbnail,
-            "views": views
-        })
+            # Append the structured data
+            stuff.append({
+                "title": title,
+                "duration": length,
+                "video_id": video_id,
+                "url": url,
+                "preview_video": preview_video,
+                "thumbnail": thumbnail,
+                "views": views
+            })
 
     return stuff
+
 
 def extractor_shorts(html_content: str) -> list[dict[str, str]]:
     parser = LexborHTMLParser(html_content)
