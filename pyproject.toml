@@ -58,6 +58,12 @@ Repository = "https://github.com/EchterAlsFake/unofficial-api-for-xhamster"
 "Donate via PayPal" = "https://paypal.me/EchterAlsFake"
 "Donate via Crypto" = "https://nowpayments.io/donation/EchterAlsFake"
 
+[project.scripts]
+xhamster_api = "xhamster_api.api:main"
+
 [tool.uv.build-backend]
 module-name = "xhamster_api"
 module-root = ""
+
+[tool.uv.sources]
+eaf-base-api = { path = "../eaf_base_api", editable = true }

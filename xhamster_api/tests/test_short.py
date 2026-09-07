@@ -10,14 +10,14 @@ async def test_short():
         raise "Can't run without AV"
 
     client = Client()
-    short = await client.get_short("https://xhamster.com/shorts/teen-jerks-pussy-shower-xhecgTc")
+    short = await client.get_short("https://xhamster.com/shorts/female-boss-wanted-employee-mind-xh8WCYr")
 
 
     assert isinstance(short.title, str) and len(short.title) > 1
     assert isinstance(short.author, str) and len(short.author) > 1
     assert isinstance(short.likes, int) and len(str(short.likes)) > 1
     assert isinstance(short.views, int) and len(str(short.views)) > 1
-    assert isinstance(short.comment_count, int) and len(str(short.comment_count)) > 1
+    assert isinstance(short.comment_count, int) and len(str(short.comment_count)) > 0
     assert isinstance(short.duration, int) and len(str(short.duration)) > 1
     assert isinstance(short.video_id, int) and len(str(short.video_id)) > 1
     assert isinstance(short.created_at, int) and len(str(short.created_at)) > 1

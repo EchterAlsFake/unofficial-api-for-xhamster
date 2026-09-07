@@ -5,6 +5,9 @@ import urllib
 import logging
 import chompjs
 import asyncio
+import argparse
+
+from base_api.modules.static_functions import str_to_bool
 
 from urllib.parse import urlencode, quote
 from typing import ClassVar, Literal, AsyncGenerator
@@ -26,6 +29,10 @@ from base_api import (
     ScrapeErrorContext,
     ScrapeResult,
     media_field,
+    make_iterator_config,
+    is_resource_gone,
+    default_on_error,
+    scrape_stream,
 )
 from base_api.modules.errors import (
     BotProtectionDetected,
@@ -46,46 +53,8 @@ logger = logging.getLogger("Xhamster API")
 logger.addHandler(logging.NullHandler())
 
 
-def make_iterator_config(
-    *,
-    max_item_concurrency: int | None = None,
-    max_page_concurrency: int | None = None,
-) -> IteratorConfig:
-    return IteratorConfig(
-        max_item_concurrency=max_item_concurrency,
-        max_page_concurrency=max_page_concurrency,
-        load_specific_sources=("html",),
-        item_retry=None,
-        page_retry=None,
-        page_error_mode=ErrorMode.SKIP,
-        item_error_handler=None,
-        page_error_handler=None,
-    )
-
-
-def _is_resource_gone(error: BaseException) -> bool:
-    if isinstance(error, ResourceGone):
-        return True
-    if isinstance(error, MediaLoadError):
-        return _is_resource_gone(error.original_error)
-    if isinstance(error, MediaLoadErrors):
-        return any(_is_resource_gone(nested) for nested in error.errors)
-    return False
-
-
-async def on_error(context: ScrapeErrorContext) -> ErrorAction:
-    logger.error(
-        "URL: %s, ERROR: %s, Attempt: %s/%s",
-        context.url,
-        context.error,
-        context.attempt,
-        context.max_attempts,
-    )
-
-    if _is_resource_gone(context.error):
-        return ErrorAction.SKIP
-
-    return ErrorAction.RETRY
+_is_resource_gone = is_resource_gone
+on_error = default_on_error
 
 
 async def get_html_content(core: BaseCore, url: str) -> str:
@@ -133,23 +102,26 @@ class Something(BaseMedia):
 
     def _extract_data(self, html_content: str) -> dict:
         parser = LexborHTMLParser(html_content)
-        if self._is_pornstar_or_creator:
-            name = parser.css_first("h2.h3-bold-8643e.primary-8643e.landing-info__user-title").text(strip=True)
+        name_node = parser.css_first(".landing-info__user-title")
+        if not name_node:
+            name_node = parser.css_first("h2.landing-info__user-title") or parser.css_first("p.landing-info__user-title")
+        name = name_node.text(strip=True) if name_node else None
 
-        else:
-            name = parser.css_first("p.h3-bold-8643e.primary-8643e.landing-info__user-title").text(strip=True)
-
-        subscribers_count = parser.css_first("div.body-8643e.primary-8643e.landing-info__metric-value").text(strip=True)
-        videos_count = parser.css("div.body-8643e.primary-8643e.landing-info__metric-value")[1].text(strip=True)
-        total_views_count =  parser.css("div.body-8643e.primary-8643e.landing-info__metric-value")[2].text(strip=True)
-        avatar_url = REGEX_AVATAR.search(html_content).group(1)
+        metric_nodes = parser.css(".landing-info__metric-value")
+        subscribers_count = metric_nodes[0].text(strip=True) if len(metric_nodes) > 0 else None
+        videos_count = metric_nodes[1].text(strip=True) if len(metric_nodes) > 1 else None
+        total_views_count = metric_nodes[2].text(strip=True) if len(metric_nodes) > 2 else None
+        avatar_match = REGEX_AVATAR.search(html_content)
+        avatar_url = avatar_match.group(1) if avatar_match else None
         dictionary = {}
 
         if self._is_pornstar_or_creator:
-            container = parser.css_first("div.personalInfo-5360e")
+            container = parser.css_first("div[class*=\"personalInfo\"]")
+            if not container:
+                container = parser.css_first("div.personalInfo-5360e")
             if container:
                 li_tags = container.css("li")
-                fortnite = parser.css("ul.list-b51e4")
+                fortnite = parser.css("ul[class*=\"list-\"]") or parser.css("ul.list-b51e4")
                 if len(fortnite) > 1:
                     li_tags.extend(fortnite[1].css("li"))
 
@@ -170,24 +142,39 @@ class Something(BaseMedia):
         }
 
 
-    async def videos(
+    def videos(
         self,
         pages: int = 2,
         iterator_config: IteratorConfig | None = None,
     ) -> AsyncGenerator[ScrapeResult[Video], None]:
-        helper = Helper(core=self.core, constructor=Video)
         page_urls = [build_page_url(url=self.url, is_search=False, idx=page) for page in range(1, pages + 1)]
-        if iterator_config is None:
-            iterator_config = make_iterator_config()
-
-        stream = helper.iterator(
-            item_extractor=extractor_videos,
+        return scrape_stream(
+            core=self.core,
+            constructor=Video,
             target_page_urls=page_urls,
+            item_extractor=extractor_videos,
             iterator_config=iterator_config,
         )
-        async with stream:
-            async for scrape_result in stream:
-                yield scrape_result
+
+    def get_shorts(
+            self,
+            pages: int = 2,
+            iterator_config: IteratorConfig | None = None,
+    ) -> AsyncGenerator[ScrapeResult[Short], None]:
+        url = self.url
+
+        if not url.endswith("/"):
+            url += "/"
+
+        url += "shorts"
+        page_urls = [build_page_url(url, is_search=False, idx=page) for page in range(1, pages + 1)]
+        return scrape_stream(
+            core=self.core,
+            constructor=Short,
+            target_page_urls=page_urls,
+            item_extractor=extractor_shorts,
+            iterator_config=iterator_config,
+        )
 
 
 class Channel(Something):
@@ -198,62 +185,11 @@ class Channel(Something):
 class Pornstar(Something):
     _is_pornstar_or_creator: bool = field(default=True, init=False)
 
-    async def get_shorts(
-            self,
-            pages: int = 2,
-            iterator_config: IteratorConfig | None = None,
-    ) -> AsyncGenerator[ScrapeResult[Short], None]:
-        url = self.url
-
-        if not url.endswith("/"):
-            url += "/"
-
-        url += "shorts"
-        page_urls = [build_page_url(url, is_search=False, idx=page) for page in range(1, pages + 1)]
-        helper = Helper(core=self.core, constructor=Short)
-
-        if iterator_config is None:
-            iterator_config = make_iterator_config()
-
-        stream = helper.iterator(
-            item_extractor=extractor_shorts,
-            target_page_urls=page_urls,
-            iterator_config=iterator_config,
-        )
-        async with stream:
-            async for scrape_result in stream:
-                yield scrape_result
-
 
 @dataclass(kw_only=True, slots=True)
 class Creator(Something):
     _is_pornstar_or_creator: bool = field(default=True, init=False)
 
-    async def get_shorts(
-            self,
-            pages: int = 2,
-            iterator_config: IteratorConfig | None = None,
-    ) -> AsyncGenerator[ScrapeResult[Short], None]:
-        url = self.url
-
-        if not url.endswith("/"):
-            url += "/"
-
-        url += "shorts"
-        page_urls = [build_page_url(url, is_search=False, idx=page) for page in range(1, pages + 1)]
-        helper = Helper(core=self.core, constructor=Short)
-
-        if iterator_config is None:
-            iterator_config = make_iterator_config()
-
-        stream = helper.iterator(
-            item_extractor=extractor_shorts,
-            target_page_urls=page_urls,
-            iterator_config=iterator_config,
-        )
-        async with stream:
-            async for scrape_result in stream:
-                yield scrape_result
 
 
 class Account:
@@ -572,7 +508,9 @@ class Video(BaseMedia):
 
 
 class Client:
-    def __init__(self, core: BaseCore = BaseCore(RuntimeConfig())):
+    def __init__(self, core: BaseCore | None = None):
+        if core is None:
+            core = BaseCore(RuntimeConfig())
         self.core = core
         self.account = None
         self.core.initialize_session()
@@ -609,7 +547,7 @@ class Client:
             await short.load_sources("html")
         return short
 
-    async def search_videos(self, query: str,
+    def search_videos(self, query: str,
         minimum_quality: Literal["720p", "1080p", "2160p"] = "720p",
         sort_by: Literal["views", "newest", "best", "longest"] | None = None, # Empty string sorts by relevance
 
@@ -661,19 +599,17 @@ class Client:
         query_string = urlencode(params, doseq=True)
         final_url = f"{url}?{query_string}" if query_string else url
         page_urls = [build_page_url(url=final_url, is_search=True, idx=page) for page in range(1, pages + 1)]
-        helper = Helper(core=self.core, constructor=Video)
 
         if iterator_config is None:
             iterator_config = make_iterator_config()
 
-        stream = helper.iterator(
-            item_extractor=extractor_videos,
+        return scrape_stream(
+            core=self.core,
+            constructor=Video,
             target_page_urls=page_urls,
+            item_extractor=extractor_videos,
             iterator_config=iterator_config,
         )
-        async with stream:
-            async for scrape_result in stream:
-                yield scrape_result
 
     async def login(self, username: str, password: str, cookies: dict | None = None) -> Account:
         if cookies:
@@ -725,3 +661,56 @@ class Client:
         else:
             logger.error("Login (probably) failed!")
             raise LoginFailed("Login probably failed, because server did not return a 200 response code, please report this / check your credentials!")
+
+
+def create_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="XHamster API Command Line Interface")
+    parser.add_argument("--download", metavar="URL", type=str, help="URL to download from")
+    parser.add_argument("--quality", metavar="best|half|worst", type=str, default="best", help="The video quality (best, half, worst)")
+    parser.add_argument("--file", metavar="FILE", type=str, help="(Optional) Specify a file with URLs (separated with new lines)")
+    parser.add_argument("--output", metavar="DIR", type=str, required=True, help="The output path (with filename or directory)")
+    parser.add_argument("--no-title", metavar="True,False", type=str, nargs="?", const="True", default="False",
+                        help="Whether to apply video title automatically to output path or not")
+    return parser
+
+
+async def run_main(args_list: list[str] | None = None):
+    parser = create_parser()
+    args = parser.parse_args(args_list)
+    no_title = str_to_bool(args.no_title) if isinstance(args.no_title, str) else bool(args.no_title)
+    config = DownloadConfigHLS(quality=args.quality, path=args.output, no_title=no_title)
+
+    urls: list[str] = []
+    if args.download:
+        urls.append(args.download)
+    if args.file:
+        with open(args.file, "r") as f:
+            urls.extend([line.strip() for line in f if line.strip()])
+
+    if not urls:
+        parser.print_help()
+        return
+
+    client = Client()
+    for url in urls:
+        print(f"Fetching video information for: {url}")
+        try:
+            video = await client.get_video(url, load_html=True)
+            title = getattr(video, "title", None) or url
+            print(f"Starting download for: {title}")
+            await video.download(configuration=config)
+            print(f"Download complete: {title}")
+        except Exception as e:
+            print(f"Error downloading {url}: {e}")
+
+
+def main():
+    try:
+        asyncio.run(run_main())
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user.")
+
+
+if __name__ == "__main__":
+    main()
+
