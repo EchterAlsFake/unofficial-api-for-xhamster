@@ -1,5 +1,6 @@
 # This module contains custom exceptions, because I do not want to re-raise the errors from eaf_base_api
 from base_api.modules.errors import (
+    ScraperException,
     NotFound,
     NetworkError,
     BotDetection,
@@ -9,7 +10,7 @@ from base_api.modules.errors import (
 )
 
 
-class LoginFailed(Exception):
+class LoginFailed(ScraperException):
     def __init__(self, msg):
         super().__init__(msg)
         self.msg = msg
@@ -24,4 +25,3 @@ __all__ = [
     "DownloadFailed",
     "LoginFailed",
 ]
-

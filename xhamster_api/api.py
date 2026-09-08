@@ -7,6 +7,8 @@ import chompjs
 import asyncio
 import argparse
 
+from base_api.modules.logger import configure_app_logging
+
 from base_api.modules.static_functions import str_to_bool
 
 from urllib.parse import urlencode, quote
@@ -35,6 +37,7 @@ from base_api import (
     scrape_stream,
 )
 from base_api.modules.errors import (
+    DownloadCancelled,
     BotProtectionDetected,
     HTTPStatusError,
     InvalidProxy,
@@ -63,21 +66,30 @@ async def get_html_content(core: BaseCore, url: str) -> str:
         return await core.fetch_text(url)
 
     except HTTPStatusError as e:
+        logger.exception("Request failed for %s: %s", url, e)
         if e.status_code == 404:
             raise NotFound(f"Server returned 404 for: {url}") from e
-        raise
+        raise NetworkError(f"Request failed for {url}: {e}") from e
 
     except NetworkRequestError as e:
-        raise NetworkError(str(e)) from e
+        logger.exception("Request failed for %s: %s", url, e)
+        raise NetworkError(f"Request failed for {url}: {e}") from e
 
     except InvalidProxy as e:
-        raise ProxyError(str(e)) from e
+        logger.exception("Request failed for %s: %s", url, e)
+        raise ProxyError(f"Request failed for {url}: {e}") from e
 
     except BotProtectionDetected as e:
-        raise BotDetection(str(e)) from e
+        logger.exception("Request failed for %s: %s", url, e)
+        raise BotDetection(f"Request failed for {url}: {e}") from e
 
     except UnknownError as e:
-        raise UnknownNetworkError(str(e)) from e
+        logger.exception("Request failed for %s: %s", url, e)
+        raise UnknownNetworkError(f"Request failed for {url}: {e}") from e
+
+    except Exception:
+        logger.exception("Failed to fetch or decode response for %s", url)
+        raise
 
 
 @dataclass(kw_only=True, slots=True)
@@ -316,20 +328,22 @@ class Short(BaseMedia):
         :param configuration:
         :return:
         """
-        await self.load_fields("title", "m3u8_base_url")
-        config = copy.deepcopy(configuration)
-
-        if not config.no_title:
-            config.path = os.path.join(config.path, f"{self.title}.mp4")
-
-        config.m3u8_base_url = self.m3u8_base_url
-
         try:
+            await self.load_fields("title", "m3u8_base_url")
+            config = copy.deepcopy(configuration)
+
+            if not config.no_title:
+                config.path = os.path.join(config.path, f"{self.title}.mp4")
+
+            config.m3u8_base_url = self.m3u8_base_url
+
             logger.info(f"Starting download for Short: {self.title}")
             return await self.core.download(configuration=config)
-
+        except DownloadCancelled:
+            raise
         except Exception as e:
-            raise DownloadFailed(str(e))
+            logger.exception("Download failed for %s: %s", self.url, e)
+            raise DownloadFailed(f"Download failed for {self.url}: {e}") from e
 
 
 @dataclass(slots=True, kw_only=True)
@@ -492,19 +506,21 @@ class Video(BaseMedia):
         :param configuration:
         :return:
         """
-        await self.load_fields("title", "m3u8_base_url")
-        config = copy.deepcopy(configuration)
-        if not config.no_title:
-            config.path = os.path.join(config.path, f"{self.title}.mp4")
-
-        config.m3u8_base_url = self.m3u8_base_url
-
         try:
+            await self.load_fields("title", "m3u8_base_url")
+            config = copy.deepcopy(configuration)
+            if not config.no_title:
+                config.path = os.path.join(config.path, f"{self.title}.mp4")
+
+            config.m3u8_base_url = self.m3u8_base_url
+
             logger.info(f"Starting download for Video: {self.title}")
             return await self.core.download(configuration=config)
-
+        except DownloadCancelled:
+            raise
         except Exception as e:
-            raise DownloadFailed(str(e))
+            logger.exception("Download failed for %s: %s", self.url, e)
+            raise DownloadFailed(f"Download failed for {self.url}: {e}") from e
 
 
 class Client:
@@ -659,8 +675,9 @@ class Client:
             return Account(core=self.core)
 
         else:
-            logger.error("Login (probably) failed!")
-            raise LoginFailed("Login probably failed, because server did not return a 200 response code, please report this / check your credentials!")
+            message = f"Login failed at https://xhamster.com/x-api: HTTP {response.status_code}"
+            logger.error(message)
+            raise LoginFailed(message)
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -701,10 +718,12 @@ async def run_main(args_list: list[str] | None = None):
             await video.download(configuration=config)
             print(f"Download complete: {title}")
         except Exception as e:
+            logger.exception("CLI failed while processing %s", url)
             print(f"Error downloading {url}: {e}")
 
 
 def main():
+    configure_app_logging(level=logging.INFO)
     try:
         asyncio.run(run_main())
     except KeyboardInterrupt:
@@ -713,4 +732,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
