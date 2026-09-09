@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import re
 import copy
 import urllib
 import logging
@@ -114,35 +115,116 @@ class Something(BaseMedia):
 
     def _extract_data(self, html_content: str) -> dict:
         parser = LexborHTMLParser(html_content)
-        name_node = parser.css_first(".landing-info__user-title")
-        if not name_node:
-            name_node = parser.css_first("h2.landing-info__user-title") or parser.css_first("p.landing-info__user-title")
+        url = getattr(self, "url", "")
+
+        # Anchor check: ensure page layout is recognized
+        anchor = (
+            parser.css_first(".landing-info")
+            or parser.css_first(".category-info")
+            or parser.css_first('article[class*="-container"]')
+            or parser.css_first('div[data-role$="-info"]')
+        )
+        if not anchor:
+            logger.warning(
+                "Layout anchor ('.landing-info' / '.category-info') not found for %s; page layout may have changed.",
+                url,
+            )
+
+        # 1. Name
+        name_node = (
+            parser.css_first(".landing-info__user-title")
+            or parser.css_first("[data-role='user-title']")
+            or parser.css_first("[data-role='user-name']")
+            or parser.css_first("h1.page-title")
+            or parser.css_first("h1")
+        )
         name = name_node.text(strip=True) if name_node else None
+        if not name:
+            logger.warning("Name not found for %s", url)
 
-        metric_nodes = parser.css(".landing-info__metric-value")
-        subscribers_count = metric_nodes[0].text(strip=True) if len(metric_nodes) > 0 else None
-        videos_count = metric_nodes[1].text(strip=True) if len(metric_nodes) > 1 else None
-        total_views_count = metric_nodes[2].text(strip=True) if len(metric_nodes) > 2 else None
-        avatar_match = REGEX_AVATAR.search(html_content)
-        avatar_url = avatar_match.group(1) if avatar_match else None
-        dictionary = {}
+        # 2. Metrics (subscribers, videos, views)
+        subscribers_count = None
+        videos_count = None
+        total_views_count = None
 
+        for metric in parser.css(".landing-info__metric"):
+            text_node = metric.css_first(".landing-info__metric-text")
+            val_node = metric.css_first(".landing-info__metric-value")
+            if not (text_node and val_node):
+                continue
+            text = text_node.text(strip=True).lower()
+            val = val_node.text(strip=True)
+            if "subscriber" in text:
+                subscribers_count = val
+            elif "video" in text:
+                videos_count = val
+            elif "view" in text:
+                total_views_count = val
+
+        # Fallback to positional metric values if text matching missed any
+        metric_values = [n.text(strip=True) for n in parser.css(".landing-info__metric-value")]
+        if subscribers_count is None and len(metric_values) > 0:
+            subscribers_count = metric_values[0]
+        if videos_count is None and len(metric_values) > 1:
+            videos_count = metric_values[1]
+        if total_views_count is None and len(metric_values) > 2:
+            total_views_count = metric_values[2]
+
+        if not subscribers_count:
+            logger.warning("Could not extract subscribers_count for %s", url)
+        if not videos_count:
+            logger.warning("Could not extract videos_count for %s", url)
+        if not total_views_count:
+            logger.warning("Could not extract total_views_count for %s", url)
+
+        # 3. Avatar URL
+        avatar_url = None
+        logo_node = parser.css_first(".landing-info__logo-image") or parser.css_first("div[class*='logo-image']")
+        if logo_node:
+            style = logo_node.attributes.get("style", "")
+            match = re.search(r"url\(['\"]?(.*?)['\"]?\)", style)
+            if match:
+                avatar_url = match.group(1)
+            else:
+                img_node = logo_node.css_first("img")
+                if img_node:
+                    avatar_url = img_node.attributes.get("src")
+
+        if not avatar_url:
+            avatar_match = REGEX_AVATAR.search(html_content)
+            if avatar_match:
+                avatar_url = avatar_match.group(1)
+
+        if not avatar_url:
+            logger.warning("Could not extract avatar_url for %s", url)
+
+        # 4. Personal Information (pornstar / creator)
+        pornstar_info: dict[str, str] = {}
         if self._is_pornstar_or_creator:
-            container = parser.css_first("div[class*=\"personalInfo\"]")
-            if not container:
-                container = parser.css_first("div.personalInfo-5360e")
-            if container:
-                li_tags = container.css("li")
-                fortnite = parser.css("ul[class*=\"list-\"]") or parser.css("ul.list-b51e4")
-                if len(fortnite) > 1:
-                    li_tags.extend(fortnite[1].css("li"))
+            about_container = (
+                parser.css_first('div[data-role$="-about-me"]')
+                or parser.css_first('div[class*="aboutMe"]')
+                or parser.css_first('div[class*="personalInfo"]')
+            )
+            if about_container:
+                for li in about_container.css("li"):
+                    label_node = li.css_first('[class*="label"]')
+                    value_node = li.css_first('[class*="value"]')
+                    if label_node and value_node:
+                        key = label_node.text(strip=True)
+                        val = value_node.text(strip=True)
+                    else:
+                        divs = li.css("div")
+                        if len(divs) >= 2:
+                            key = divs[0].text(strip=True)
+                            val = divs[1].text(strip=True)
+                        else:
+                            continue
+                    if key:
+                        pornstar_info[key] = val
 
-                for li_tag in li_tags:
-                    divs = li_tag.css("div")
-                    if len(divs) >= 2:
-                        key = divs[0].text(strip=True)
-                        value = divs[1].text(strip=True)
-                        dictionary[key] = value
+            if not pornstar_info:
+                logger.warning("Could not extract personal information for %s", url)
 
         return {
             "name": name,
@@ -150,8 +232,10 @@ class Something(BaseMedia):
             "videos_count": videos_count,
             "total_views_count": total_views_count,
             "avatar_url": avatar_url,
-            "pornstar_information": dictionary
+            "pornstar_information": pornstar_info,
         }
+
+    _extract_html = _extract_data
 
 
     def videos(
@@ -350,13 +434,13 @@ class Short(BaseMedia):
 class Video(BaseMedia):
     core: BaseCore
     url: str
-    video_id: str | None = media_field("html")
+    video_id: int | None = media_field("html")
     title: str | None = media_field("html")
     rating_percentage: int | None = media_field("html")
     likes: int | None = media_field("html")
     dislikes: int | None = media_field("html")
     uploader_name: str | None = media_field("html")
-    uploader_subscribers: str | None = media_field("html")
+    uploader_subscribers: int | None = media_field("html")
     tags: list[str] | None = media_field("html")
     categories: list[str] | None = media_field("html")
     pornstars: list[str] | None = media_field("html")
@@ -367,7 +451,7 @@ class Video(BaseMedia):
     duration: int | None = media_field("html")
     views: int | None = media_field("html")
     comments_count: int | None = media_field("html")
-    created_timestamp: str | None = media_field("html")
+    created_timestamp: str | int | None = media_field("html")
     date_ago: str | None = media_field("html")
     is_vr: bool | None = media_field("html")
     is_hd: bool | None = media_field("html")
@@ -384,48 +468,208 @@ class Video(BaseMedia):
         html_content = await get_html_content(core=self.core, url=self.url)
         return await asyncio.to_thread(self._extract_html, html_content)
 
-    @staticmethod
-    def _extract_html(html_content) -> dict:
-        lexbor = LexborHTMLParser(html_content)
-        script = lexbor.css_first("script#initials-script")
+    def _extract_html(self, html_content: str) -> dict:
+        parser = LexborHTMLParser(html_content)
+        url = getattr(self, "url", "")
 
-        if not script:
-            return {}
+        # Anchor check: ensure this is a recognizable video page
+        if (
+            not parser.css_first("main.video-type-video")
+            and not parser.css_first(".player-container")
+            and not parser.css_first("[data-role='video-heading']")
+        ):
+            logger.warning(
+                "Video container anchor ('main.video-type-video' / '.player-container') not found for %s; page layout may have changed.",
+                url,
+            )
 
-        json_text = script.text().split("window.initials=", 1)[-1].strip().rstrip(";")
-        data = chompjs.parse_js_object(json_text)
+        data: dict = {}
+        script = parser.css_first("script#initials-script")
+        if script and script.text():
+            try:
+                json_text = script.text().split("window.initials=", 1)[-1].strip().rstrip(";")
+                data = chompjs.parse_js_object(json_text)
+            except Exception as e:
+                logger.warning("Failed to parse initials-script JSON for %s: %s", url, e)
 
-        # Set up base dictionary paths
         video_entity = data.get("videoEntity", {})
         video_model = data.get("videoModel", {})
         tags_component = data.get("videoTagsComponent", {}).get("tags", [])
 
-        # 1. Core Identity
-        video_id = video_entity.get("id") or video_model.get("id")
-        video_hash = video_entity.get("idHashSlug") or video_model.get("idHashSlug")
+        # 1. Title
         title = video_entity.get("title") or video_model.get("title")
-        description = video_entity.get("description") or video_model.get("description")
+        if not title:
+            title_node = parser.css_first("h1.title-3e2be, [data-role='video-heading'] h1, h1")
+            title = title_node.text(strip=True) if title_node else None
+        if not title:
+            logger.warning("Title not found for %s", url)
 
-        # 2. Metadata & Metrics
-        duration = video_entity.get("duration") or video_model.get("duration", 0)
-        views = video_entity.get("views") or video_model.get("views", 0)
-        comments_count = video_entity.get("commentsCount") or video_model.get("comments", 0)
+        # 2. Video ID & Hash
+        video_id = video_entity.get("id") or video_model.get("id")
+        if video_id is not None:
+            try:
+                video_id = int(video_id)
+            except (ValueError, TypeError):
+                video_id = None
+        if not video_id:
+            player_el = parser.css_first(".player-container, [data-role='xplayer']")
+            search_scope = player_el.html if player_el else html_content
+            if id_match := re.search(r"/(\d{3})/(\d{3})/(\d{3})/", search_scope):
+                try:
+                    video_id = int("".join(id_match.groups()))
+                except ValueError:
+                    video_id = None
+        if not video_id:
+            logger.warning("Video ID not found for %s", url)
+
+        video_hash = video_entity.get("idHashSlug") or video_model.get("idHashSlug")
+        if not video_hash:
+            if hash_match := re.search(r"-(xh[a-zA-Z0-9]+)", url):
+                video_hash = hash_match.group(1)
+            elif mobile_link := parser.css_first("a[href*='x_platform_switch=mobile'], a.version-cb57f"):
+                if m := re.search(r"-(xh[a-zA-Z0-9]+)", mobile_link.attributes.get("href", "")):
+                    video_hash = m.group(1)
+
+        # 3. Description
+        description = video_entity.get("description") or video_model.get("description")
+        if description is None:
+            desc_el = parser.css_first("p.controls-info__description, meta[name='description']")
+            if desc_el:
+                description = desc_el.attributes.get("content") if desc_el.tag == "meta" else desc_el.text(strip=True)
+            else:
+                description = ""
+
+        # 4. Duration
+        duration = video_entity.get("duration") or video_model.get("duration")
+        if duration is not None:
+            try:
+                duration = int(duration)
+            except (ValueError, TypeError):
+                duration = 0
+        else:
+            eta_el = parser.css_first(".timing .eta, span.eta")
+            if eta_el:
+                parts = eta_el.text(strip=True).split(":")
+                try:
+                    if len(parts) == 2:
+                        duration = int(parts[0]) * 60 + int(parts[1])
+                    elif len(parts) == 3:
+                        duration = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                    else:
+                        duration = 0
+                except ValueError:
+                    duration = 0
+            else:
+                duration = 0
+
+        # 5. Views
+        views = video_entity.get("views") or video_model.get("views")
+        if views is not None:
+            try:
+                views = int(views)
+            except (ValueError, TypeError):
+                views = 0
+        else:
+            views_node = parser.css_first(".eyeIcon-a993a, [aria-label*='views']")
+            if views_node and (label := views_node.attributes.get("aria-label")):
+                if v_match := re.search(r"(\d+)", label.replace(" ", "")):
+                    try:
+                        views = int(v_match.group(1))
+                    except ValueError:
+                        views = 0
+            if views is None:
+                views = 0
+
+        # 6. Comments count
+        comments_count = video_entity.get("commentsCount") or video_model.get("comments")
+        if comments_count is not None:
+            try:
+                comments_count = int(comments_count)
+            except (ValueError, TypeError):
+                comments_count = 0
+        else:
+            comm_el = parser.css_first(
+                ".comments-control .count-c7c46, [data-role='video-comments'] .count-c7c46, span.count-c7c46"
+            )
+            if comm_el and comm_el.text(strip=True).isdigit():
+                comments_count = int(comm_el.text(strip=True))
+            else:
+                comments_count = 0
+
+        # 7. Timestamps
         created_timestamp = video_model.get("created")
         date_ago = video_entity.get("dateAgo")
+        if not created_timestamp or not date_ago:
+            date_node = parser.css_first(".entity-info-container__date")
+            if date_node:
+                created_timestamp = created_timestamp or date_node.attributes.get("data-tooltip")
+                date_ago = date_ago or date_node.text(strip=True)
 
-        # 3. Ratings
+        # 8. Ratings
         rating_model = video_entity.get("rating", {})
-        rating_percentage = rating_model.get("value", 0)
-        likes = rating_model.get("likes", 0)
-        dislikes = rating_model.get("dislikes", 0)
+        rating_percentage = rating_model.get("value")
+        likes = rating_model.get("likes")
+        dislikes = rating_model.get("dislikes")
 
-        # 4. Technical Specs
+        if rating_percentage is None or likes is None or dislikes is None:
+            rating_info = parser.css_first("p.rb-new__info")
+            if rating_info:
+                if rating_percentage is None:
+                    tooltip = rating_info.attributes.get("data-tooltip", "")
+                    if rp_match := re.search(r"(\d+)", tooltip):
+                        rating_percentage = int(rp_match.group(1))
+                if likes is None or dislikes is None:
+                    aria = rating_info.attributes.get("aria-label", "")
+                    if ld_match := re.search(r"(\d+)\s+likes?,\s+(\d+)\s+dislikes?", aria):
+                        likes = int(ld_match.group(1))
+                        dislikes = int(ld_match.group(2))
+                    elif split_match := re.search(r"(\d+)\s*/\s*(\d+)", rating_info.text(strip=True)):
+                        likes = int(split_match.group(1))
+                        dislikes = int(split_match.group(2))
+
+        try:
+            rating_percentage = int(rating_percentage) if rating_percentage is not None else 0
+        except (ValueError, TypeError):
+            rating_percentage = 0
+
+        try:
+            likes = int(likes) if likes is not None else 0
+        except (ValueError, TypeError):
+            likes = 0
+
+        try:
+            dislikes = int(dislikes) if dislikes is not None else 0
+        except (ValueError, TypeError):
+            dislikes = 0
+
+        # 9. Technical Specs
         is_vr = video_entity.get("isVr", False)
-        is_hd = video_model.get("isHD", False)
+        is_hd = video_model.get("isHD")
         max_resolution = video_entity.get("maxResolution")
-        orientation = video_entity.get("orientation")  # e.g., 'straight', 'gay'
+        orientation = video_entity.get("orientation")
 
-        # 5. Taxonomy loop
+        if max_resolution is None:
+            res_nodes = parser.css(
+                ".chooser-control.xp-settings-inner-list-inner span[data-value], .quality.chooser-control span[data-value]"
+            )
+            for rn in res_nodes:
+                val = rn.attributes.get("data-value", "").strip()
+                if val and val != "auto":
+                    max_resolution = val
+                    break
+
+        if is_hd is None:
+            is_hd = bool(parser.css_first("span.HD")) or (
+                max_resolution in ("720p", "1080p", "1440p", "2160p", "4k")
+            )
+
+        if not orientation:
+            if or_node := parser.css_first("use[id='straight'], use[id='gay'], use[id='shemale']"):
+                orientation = or_node.attributes.get("id")
+            else:
+                orientation = "straight"
+
+        # 10. Taxonomy & Uploader
         categories = []
         tags = []
         pornstars = []
@@ -436,7 +680,6 @@ class Video(BaseMedia):
             tag_name = tag.get("name")
             if not tag_name:
                 continue
-
             if tag.get("isCategory"):
                 categories.append(tag_name)
             elif tag.get("isTag"):
@@ -446,33 +689,85 @@ class Video(BaseMedia):
             elif tag.get("isUser") or tag.get("isChannel"):
                 if not uploader_name:
                     uploader_name = tag_name
-
                 sub_model = tag.get("subscriptionModel") or {}
                 if "subscribers" in sub_model:
                     uploader_subscribers = sub_model["subscribers"]
 
-        # Fallbacks for arrays/uploader
         if not pornstars:
             pornstars = [p.get("name") for p in video_entity.get("pornstarModels", []) if p.get("name")]
 
-        if not uploader_name:
-            uploader_elem = lexbor.css_first("div.item-50dd2 span.body-bold-8643e.label-5984a.label-96c3e")
-            if uploader_elem:
-                uploader_name = uploader_elem.text(strip=True)
+        if not categories or not tags or not pornstars:
+            for a in parser.css("#video-tags-list-container a[href]"):
+                href = a.attributes.get("href", "")
+                if "faphouse.com" in href:
+                    continue
+                label_el = a.css_first("[class*='label-']")
+                item_name = label_el.text(strip=True) if label_el else a.text(strip=True)
+                if not item_name:
+                    continue
+                if "/pornstars/" in href and item_name not in pornstars:
+                    pornstars.append(item_name)
+                elif ("/categories/" in href or href.endswith("/hd")) and item_name not in categories:
+                    categories.append(item_name)
+                elif "/tags/" in href and item_name not in tags:
+                    tags.append(item_name)
 
-        # 6. Media Links
+        if not categories:
+            logger.warning("Categories not found for %s", url)
+        if not tags:
+            logger.warning("Tags not found for %s", url)
+
+        if not uploader_name:
+            uploader_el = parser.css_first(
+                ".entity-author-container__name span, .entity-author-container__name, "
+                "div.item-50dd2 span.body-bold-8643e.label-5984a.label-96c3e"
+            )
+            if uploader_el:
+                uploader_name = uploader_el.text(strip=True)
+        if not uploader_name:
+            logger.warning("Uploader name not found for %s", url)
+
+        try:
+            uploader_subscribers = int(uploader_subscribers) if uploader_subscribers is not None else 0
+        except (ValueError, TypeError):
+            uploader_subscribers = 0
+
+        # 11. Media Links
         thumbnail = video_model.get("thumbURL") or video_entity.get("thumbBig")
+        if not thumbnail:
+            preload_el = parser.css_first(".xp-preload-image")
+            if preload_el and (style := preload_el.attributes.get("style")):
+                if t_match := re.search(r"url\(['\"]?([^'\"()]+(?:\([^)]*\)[^'\"()]*)*)['\"]?\)", style):
+                    thumbnail = t_match.group(1)
+                elif t_match := re.search(r"url\(['\"]([^'\"]+)['\"]\)", style):
+                    thumbnail = t_match.group(1)
+        if not thumbnail:
+            vid_node = parser.css_first("video.player-container__no-script-video")
+            if vid_node:
+                thumbnail = vid_node.attributes.get("poster")
         if not thumbnail:
             thumb_match = REGEX_THUMBNAIL.search(html_content)
             thumbnail = thumb_match.group(1) if thumb_match else ""
+        if not thumbnail:
+            logger.warning("Thumbnail not found for %s", url)
 
-        # Often a sprite/GIF preview URL, highly useful for front-end clients
         preview_thumbnail = video_model.get("previewThumbURL")
+        if not preview_thumbnail:
+            sprite_el = parser.css_first(".thumb-image-container__sprite[data-sprite]")
+            if sprite_el:
+                preview_thumbnail = sprite_el.attributes.get("data-sprite")
 
         m3u8_base_url = ""
         m3u8_match = REGEX_M3U8.search(html_content)
         if m3u8_match:
-            m3u8_base_url = m3u8_match.group(0).replace("\\/", "/")
+            m3u8_base_url = m3u8_match.group(0).replace(r"\/", "/")
+        elif (hls_url := data.get("xplayerSettings", {}).get("sources", {}).get("hls", {}).get("h264", {}).get("url")):
+            m3u8_base_url = hls_url
+        elif (fallback_vid := parser.css_first("video.player-container__no-script-video, a.player-container__no-player")):
+            m3u8_base_url = fallback_vid.attributes.get("src") or fallback_vid.attributes.get("href") or ""
+
+        if not m3u8_base_url:
+            logger.warning("m3u8_base_url not found for %s", url)
 
         return {
             "video_id": video_id,
@@ -498,7 +793,7 @@ class Video(BaseMedia):
             "pornstars": pornstars,
             "thumbnail": thumbnail,
             "preview_thumbnail": preview_thumbnail,
-            "m3u8_base_url": m3u8_base_url
+            "m3u8_base_url": m3u8_base_url,
         }
 
     async def download(self, configuration: DownloadConfigHLS) -> bool | DownloadReport:
