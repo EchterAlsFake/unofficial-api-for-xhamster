@@ -1,14 +1,14 @@
 from __future__ import annotations
-import os
 import re
-import copy
 import urllib
 import logging
 import chompjs
 import asyncio
 import argparse
 
-from base_api.modules.logger import configure_app_logging
+from xhamster_api.modules import errors as provider_errors
+from base_api.modules.provider import fetch_content, download_errors, download_hls
+from base_api.modules.logger import configure_app_logging, get_logger, log_context
 
 from base_api.modules.static_functions import str_to_bool
 
@@ -37,15 +37,6 @@ from base_api import (
     default_on_error,
     scrape_stream,
 )
-from base_api.modules.errors import (
-    DownloadCancelled,
-    BotProtectionDetected,
-    HTTPStatusError,
-    InvalidProxy,
-    NetworkRequestError,
-    ResourceGone,
-    UnknownError,
-)
 
 from xhamster_api.modules.errors import (NetworkError, UnknownNetworkError, NotFound, BotDetection, ProxyError,
                                          DownloadFailed, LoginFailed)
@@ -53,44 +44,16 @@ from xhamster_api.modules.consts import (build_page_url, headers, REGEX_AVATAR, 
                                         REGEX_THUMBNAIL, extractor_shorts)
 
 
-logger = logging.getLogger("Xhamster API")
-logger.addHandler(logging.NullHandler())
+logger = get_logger(__name__)
 
 
 _is_resource_gone = is_resource_gone
 on_error = default_on_error
 
 
-async def get_html_content(core: BaseCore, url: str) -> str:
-    logger.debug(f"Fetching HTML content for URL: {url}")
-    try:
-        return await core.fetch_text(url)
-
-    except HTTPStatusError as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        if e.status_code == 404:
-            raise NotFound(f"Server returned 404 for: {url}") from e
-        raise NetworkError(f"Request failed for {url}: {e}") from e
-
-    except NetworkRequestError as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        raise NetworkError(f"Request failed for {url}: {e}") from e
-
-    except InvalidProxy as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        raise ProxyError(f"Request failed for {url}: {e}") from e
-
-    except BotProtectionDetected as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        raise BotDetection(f"Request failed for {url}: {e}") from e
-
-    except UnknownError as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        raise UnknownNetworkError(f"Request failed for {url}: {e}") from e
-
-    except Exception:
-        logger.exception("Failed to fetch or decode response for %s", url)
-        raise
+async def get_html_content(core: BaseCore, url: str, *, owner=None) -> str:
+    return await fetch_content(core, url, logger=logger, owner=owner,
+                               error_types=provider_errors)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -110,7 +73,7 @@ class Something(BaseMedia):
     loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
 
     async def _load_html(self) -> dict[str, object]:
-        html_content = await get_html_content(url=self.url, core=self.core)
+        html_content = await get_html_content(url=self.url, core=self.core, owner=self)
         return await asyncio.to_thread(self._extract_data, html_content)
 
     def _extract_data(self, html_content: str) -> dict:
@@ -358,7 +321,7 @@ class Short(BaseMedia):
     loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
 
     async def _load_html(self) -> dict[str, object]:
-        html_content = await get_html_content(core=self.core, url=self.url)
+        html_content = await get_html_content(core=self.core, url=self.url, owner=self)
         return await asyncio.to_thread(self._extract_data, html_content)
 
     @staticmethod
@@ -407,27 +370,9 @@ class Short(BaseMedia):
             "m3u8_base_url": m3u8_base_url
         }
 
+    @download_errors(DownloadFailed)
     async def download(self, configuration: DownloadConfigHLS) -> bool | DownloadReport:
-        """
-        :param configuration:
-        :return:
-        """
-        try:
-            await self.load_fields("title", "m3u8_base_url")
-            config = copy.deepcopy(configuration)
-
-            if not config.no_title:
-                config.path = os.path.join(config.path, f"{self.title}.mp4")
-
-            config.m3u8_base_url = self.m3u8_base_url
-
-            logger.info(f"Starting download for Short: {self.title}")
-            return await self.core.download(configuration=config)
-        except DownloadCancelled:
-            raise
-        except Exception as e:
-            logger.exception("Download failed for %s: %s", self.url, e)
-            raise DownloadFailed(f"Download failed for {self.url}: {e}") from e
+        return await download_hls(self, configuration)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -465,7 +410,7 @@ class Video(BaseMedia):
     loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
 
     async def _load_html(self) -> dict[str, object]:
-        html_content = await get_html_content(core=self.core, url=self.url)
+        html_content = await get_html_content(core=self.core, url=self.url, owner=self)
         return await asyncio.to_thread(self._extract_html, html_content)
 
     def _extract_html(self, html_content: str) -> dict:
@@ -490,7 +435,7 @@ class Video(BaseMedia):
                 json_text = script.text().split("window.initials=", 1)[-1].strip().rstrip(";")
                 data = chompjs.parse_js_object(json_text)
             except Exception as e:
-                logger.warning("Failed to parse initials-script JSON for %s: %s", url, e)
+                logger.warning("Failed to parse initials-script JSON for %s: %s", url, e, exc_info=True)
 
         video_entity = data.get("videoEntity", {})
         video_model = data.get("videoModel", {})
@@ -796,26 +741,9 @@ class Video(BaseMedia):
             "m3u8_base_url": m3u8_base_url,
         }
 
+    @download_errors(DownloadFailed)
     async def download(self, configuration: DownloadConfigHLS) -> bool | DownloadReport:
-        """
-        :param configuration:
-        :return:
-        """
-        try:
-            await self.load_fields("title", "m3u8_base_url")
-            config = copy.deepcopy(configuration)
-            if not config.no_title:
-                config.path = os.path.join(config.path, f"{self.title}.mp4")
-
-            config.m3u8_base_url = self.m3u8_base_url
-
-            logger.info(f"Starting download for Video: {self.title}")
-            return await self.core.download(configuration=config)
-        except DownloadCancelled:
-            raise
-        except Exception as e:
-            logger.exception("Download failed for %s: %s", self.url, e)
-            raise DownloadFailed(f"Download failed for {self.url}: {e}") from e
+        return await download_hls(self, configuration)
 
 
 class Client:
@@ -923,56 +851,61 @@ class Client:
         )
 
     async def login(self, username: str, password: str, cookies: dict | None = None) -> Account:
-        if cookies:
-            self.core.session.cookies.update(cookies)
-            return Account(self.core)
+        with log_context(self, "https://xhamster.com/x-api"):
+            try:
+                if cookies:
+                    self.core.session.cookies.update(cookies)
+                    return Account(self.core)
 
-        payload = [
-            {
-                "name": "authorizedUserModelSync",
-                "requestData": {
-                    "model": {
-                        "id": None,
-                        "$id": "c1a902b0-cb96-4098-89f9-2bd0010586aa",
-                        "modelName": "authorizedUserModel",
-                        "itemState": "unchanged"
-                    },
-                    "username": username,
-                    "password": password,
-                    "remember": 1,
-                    "redirectURL": "https://xhamster.com/login",
-                    "pageType": None,
-                    "source": None,
-                    "isSubscribedToUpdates": None,
-                    "trusted": True
+                payload = [
+                    {
+                        "name": "authorizedUserModelSync",
+                        "requestData": {
+                            "model": {
+                                "id": None,
+                                "$id": "c1a902b0-cb96-4098-89f9-2bd0010586aa",
+                                "modelName": "authorizedUserModel",
+                                "itemState": "unchanged"
+                            },
+                            "username": username,
+                            "password": password,
+                            "remember": 1,
+                            "redirectURL": "https://xhamster.com/login",
+                            "pageType": None,
+                            "source": None,
+                            "isSubscribedToUpdates": None,
+                            "trusted": True
+                        }
+                    }
+                ]
+
+                headers = {
+                    "Accept": "application/json, text/plain, */*",
+                    "Content-Type": "application/json",
+                    "X-Requested-With": "XMLHttpRequest",  # Tells the server this is an AJAX/API fetch
+                    "Origin": "https://xhamster.com",
+                    "Referer": "https://xhamster.com/login",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 }
-            }
-        ]
 
-        headers = {
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json",
-            "X-Requested-With": "XMLHttpRequest",  # Tells the server this is an AJAX/API fetch
-            "Origin": "https://xhamster.com",
-            "Referer": "https://xhamster.com/login",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
+                response = await self.core.request(
+                    method="POST",
+                    url="https://xhamster.com/x-api",
+                    json_data=payload,
+                    headers=headers,
+                )
+                if response.status_code == 200:
+                    logger.info("Login Successful!")
+                    self.account = Account(core=self.core)
+                    return Account(core=self.core)
 
-        response = await self.core.request(
-            method="POST",
-            url="https://xhamster.com/x-api",
-            json_data=payload,
-            headers=headers,
-        )
-        if response.status_code == 200:
-            logger.info("Login Successful!")
-            self.account = Account(core=self.core)
-            return Account(core=self.core)
-
-        else:
-            message = f"Login failed at https://xhamster.com/x-api: HTTP {response.status_code}"
-            logger.error(message)
-            raise LoginFailed(message)
+                else:
+                    message = f"Login failed at https://xhamster.com/x-api: HTTP {response.status_code}"
+                    logger.error(message)
+                    raise LoginFailed(message)
+            except Exception:
+                logger.exception("Login failed")
+                raise
 
 
 def create_parser() -> argparse.ArgumentParser:
