@@ -895,14 +895,33 @@ class Client:
                     headers=headers,
                 )
                 if response.status_code == 200:
-                    logger.info("Login Successful!")
-                    self.account = Account(core=self.core)
-                    return Account(core=self.core)
+                    data = response.json()
+                    if isinstance(data, list) and len(data) > 0:
+                        extras = data[0].get("extras", {})
+                        if "error" in extras:
+                            error_info = extras["error"]
+                            if isinstance(error_info, dict):
+                                error_msg = ", ".join(f"{k}: {v}" for k, v in error_info.items())
+                            else:
+                                error_msg = str(error_info)
+                            message = f"Login failed: {error_msg}"
+                            logger.error(message)
+                            raise LoginFailed(message)
 
+                        if extras.get("result") is True:
+                            logger.info("Login Successful!")
+                            self.account = Account(core=self.core)
+                            return Account(core=self.core)
+
+                    message = "Login failed: Unexpected API response payload"
+                    logger.error(message)
+                    raise LoginFailed(message)
                 else:
                     message = f"Login failed at https://xhamster.com/x-api: HTTP {response.status_code}"
                     logger.error(message)
                     raise LoginFailed(message)
+            except LoginFailed:
+                raise
             except Exception:
                 logger.exception("Login failed")
                 raise
