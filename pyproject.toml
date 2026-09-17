@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "unofficial-api-for-xhamster"
-version = "2.6.1"
+version = "2.6.2"
 description = "An asynchronous Python API wrapper and scraper for xHamster"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12"
