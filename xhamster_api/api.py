@@ -1,5 +1,6 @@
 from __future__ import annotations
 import re
+from functools import partial
 import urllib
 import logging
 import chompjs
@@ -7,6 +8,8 @@ import asyncio
 import argparse
 
 from xhamster_api.modules import errors as provider_errors
+from base_api import update_url_query
+from base_api import profile_base_url
 from base_api.modules.provider import fetch_content, download_errors, download_hls
 from base_api.modules.logger import configure_app_logging, get_logger, log_context
 
@@ -58,6 +61,10 @@ async def get_html_content(core: BaseCore, url: str, *, owner=None) -> str:
 
 @dataclass(kw_only=True, slots=True)
 class Something(BaseMedia):
+
+    def __post_init__(self):
+        profile_base_url(self.url, depth=2)
+
     url: str
     core: BaseCore
     name: str | None = media_field("html")
@@ -206,12 +213,12 @@ class Something(BaseMedia):
         pages: int = 2,
         iterator_config: IteratorConfig | None = None,
     ) -> AsyncGenerator[ScrapeResult[Video], None]:
-        page_urls = [build_page_url(url=self.url, is_search=False, idx=page) for page in range(1, pages + 1)]
+        page_urls = [build_page_url(url=self.resolved_url or self.url, is_search=False, idx=page) for page in range(1, pages + 1)]
         return scrape_stream(
             core=self.core,
             constructor=Video,
             target_page_urls=page_urls,
-            item_extractor=extractor_videos,
+            item_extractor=partial(extractor_videos, base_url=self.resolved_url or self.url),
             iterator_config=iterator_config,
         )
 
@@ -226,7 +233,7 @@ class Something(BaseMedia):
             url += "/"
 
         url += "shorts"
-        page_urls = [build_page_url(url, is_search=False, idx=page) for page in range(1, pages + 1)]
+        page_urls = [build_page_url(self.resolved_url or url, is_search=False, idx=page) for page in range(1, pages + 1)]
         return scrape_stream(
             core=self.core,
             constructor=Short,
@@ -281,7 +288,7 @@ class Account:
         iterator_config: IteratorConfig | None = None,
     ) -> AsyncGenerator[ScrapeResult[Video], None]:
         helper = Helper(core=self.core, constructor=Video)
-        page_urls = [f"{url}?page={page}" for page in range(1, pages + 1)]
+        page_urls = [update_url_query(url, page=page) for page in range(1, pages + 1)]
         if iterator_config is None:
             iterator_config = make_iterator_config()
 

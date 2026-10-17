@@ -1,3 +1,5 @@
+from urllib.parse import urlsplit, urljoin
+from base_api import append_url_path, replace_url_path, update_url_query
 import re
 
 from selectolax.lexbor import LexborHTMLParser
@@ -16,7 +18,7 @@ headers = {
 }
 
 
-def extractor_videos(html_content: str) -> list[dict[str, str]]:
+def extractor_videos(html_content: str, base_url: str = "https://xhamster.com") -> list[dict[str, str]]:
     parser = LexborHTMLParser(html_content)
     stuff = []
 
@@ -81,7 +83,7 @@ def extractor_videos(html_content: str) -> list[dict[str, str]]:
                 "title": title,
                 "duration": length,
                 "video_id": video_id,
-                "url": url,
+                "url": urljoin(base_url, url),
                 "preview_video": preview_video,
                 "thumbnail": thumbnail,
                 "views": views
@@ -90,7 +92,7 @@ def extractor_videos(html_content: str) -> list[dict[str, str]]:
     return stuff
 
 
-def extractor_shorts(html_content: str) -> list[dict[str, str]]:
+def extractor_shorts(html_content: str, base_url: str = "https://xhamster.com") -> list[dict[str, str]]:
     parser = LexborHTMLParser(html_content)
     stuff = []
 
@@ -113,7 +115,7 @@ def extractor_shorts(html_content: str) -> list[dict[str, str]]:
         stuff.append({
             "title": title,
             "video_id": video_id,
-            "url": url,
+            "url": urljoin(base_url, url),
             "preview_video": preview_video,
             "thumbnail": thumbnail,
             "views": views
@@ -123,11 +125,9 @@ def extractor_shorts(html_content: str) -> list[dict[str, str]]:
 
 def build_page_url(url: str, is_search: bool, idx: int) -> str:
     if is_search:
-        # query-string pagination
-        joiner = "&" if "?" in url else "?"
-        return f"{url}{joiner}page={idx}"
-
-    if idx == 1:
-        return url
-
-    return f"{url}/{idx}"
+        return update_url_query(url, page=idx)
+    parts = urlsplit(url).path.rstrip("/").split("/")
+    if len(parts) > 3 and parts[-1].isdigit():
+        parts.pop()
+    base_url = update_url_query(replace_url_path(url, "/".join(parts)), page=None)
+    return base_url if idx == 1 else append_url_path(base_url, idx)
