@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 
 [[package]]
@@ -194,16 +194,16 @@ wheels = [
 
 [[package]]
 name = "eaf-base-api"
-version = "4.2.0"
+version = "4.2.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cachetools" },
     { name = "curl-cffi" },
     { name = "tenacity" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/98/c0/13ebf9afc9e693e175992a67cbc9baa5906e1b15948165a1b24d56ffff03/eaf_base_api-4.2.0.tar.gz", hash = "sha256:2a1690a5f5e3feb81df73b64fca3925d3bb59a1f1601ec47ed58f1f211a54da3", size = 71840, upload-time = "2026-09-15T13:34:37.301Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/95/25/20486878227cea953e7db6bdf004e9ef96a7db57de02007f87b60df4f6a0/eaf_base_api-4.2.3.tar.gz", hash = "sha256:df7142a0136df88b8a3d2fc2ce661ff78caa97b0314af429fd3a46414775341d", size = 77220, upload-time = "2026-10-26T20:52:50.305Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d3/86/3afa844af8bef9da0513a3ee282c2d0740fd83e813e993bf66a0c85cc094/eaf_base_api-4.2.0-py3-none-any.whl", hash = "sha256:09a9bfe0b5e9c87821c1f0a5e674da82fcf65d99e84327462fe81b0c8f341397", size = 72749, upload-time = "2026-09-15T13:34:36.037Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/e2/77b87963f89a6bf216c6c0bef91e2eeab9b7a835ddee42a14b586ba43174/eaf_base_api-4.2.3-py3-none-any.whl", hash = "sha256:f29675695a4df69c4b57fd9e6fce5844dc2dcf72536ed04aa1087fc8c8e7afb7", size = 77848, upload-time = "2026-10-26T20:52:48.634Z" },
 ]
 
 [[package]]
@@ -322,7 +322,7 @@ wheels = [
 
 [[package]]
 name = "unofficial-api-for-xhamster"
-version = "2.6.2"
+version = "2.6.4"
 source = { editable = "." }
 dependencies = [
     { name = "chompjs" },
@@ -342,7 +342,7 @@ requires-dist = [
     { name = "av", marker = "extra == 'av'" },
     { name = "chompjs" },
     { name = "curl-cffi" },
-    { name = "eaf-base-api", specifier = ">=4.2.0" },
+    { name = "eaf-base-api", specifier = ">=4.2.2" },
     { name = "m3u8" },
     { name = "selectolax" },
 ]

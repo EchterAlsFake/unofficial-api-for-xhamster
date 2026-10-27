@@ -1,6 +1,7 @@
 from urllib.parse import urlsplit, urljoin
 from base_api import append_url_path, replace_url_path, update_url_query
 import re
+import json
 
 from selectolax.lexbor import LexborHTMLParser
 
@@ -21,6 +22,42 @@ headers = {
 def extractor_videos(html_content: str, base_url: str = "https://xhamster.com") -> list[dict[str, str]]:
     parser = LexborHTMLParser(html_content)
     stuff = []
+
+    # Account lists are rendered from initials JSON. The HTML thumbnails can
+    # belong entirely to the recommendations sidebar, not the requested list.
+    script = parser.css_first("script#initials-script")
+    if script is not None and "window.initials=" in script.text():
+        try:
+            initials = json.loads(script.text().split("window.initials=", 1)[1].strip().rstrip(";"))
+        except (ValueError, TypeError):
+            initials = {}
+        if not isinstance(initials, dict):
+            initials = {}
+        layout = initials.get("layoutPage", {})
+        liked = layout.get("likedVideosListProps") if isinstance(layout, dict) else None
+        account_rows = None
+        if isinstance(liked, dict):
+            account_rows = liked.get("videoThumbProps", [])
+        elif "favoritesVideoCollection" in initials:
+            account_rows = initials["favoritesVideoCollection"]
+        if isinstance(account_rows, list):
+            seen = set()
+            for item in account_rows:
+                if not isinstance(item, dict) or not item.get("pageURL"):
+                    continue
+                url = urljoin(base_url, item["pageURL"])
+                if url in seen:
+                    continue
+                seen.add(url)
+                stuff.append({
+                    "url": url, "video_id": str(item["id"]) if item.get("id") is not None else None,
+                    "title": item.get("title"),
+                    "duration": str(item["duration"]) if item.get("duration") is not None else None,
+                    "thumbnail": item.get("imageURL") or item.get("thumbURL"),
+                    "preview_video": item.get("trailerURL"),
+                    "views": str(item["views"]) if item.get("views") is not None else None,
+                })
+            return stuff
 
     # FIX 1: The site now renders MULTIPLE candidate containers on search
     # pages — an empty placeholder div[data-role="main-search-content"]
