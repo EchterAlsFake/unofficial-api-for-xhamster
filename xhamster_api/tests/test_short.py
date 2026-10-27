@@ -6,8 +6,8 @@ from ..api import Client, DownloadConfigHLS
 async def test_short():
     try:
         import av
-    except:
-        raise "Can't run without AV"
+    except (ModuleNotFoundError, ImportError):
+        pytest.skip("Can't run without AV")
 
     client = Client()
     short = await client.get_short("https://xhamster.com/shorts/female-boss-wanted-employee-mind-xh8WCYr")

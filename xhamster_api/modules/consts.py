@@ -23,16 +23,22 @@ def extractor_videos(html_content: str, base_url: str = "https://xhamster.com") 
     parser = LexborHTMLParser(html_content)
     stuff = []
 
-    # Account lists are rendered from initials JSON. The HTML thumbnails can
-    # belong entirely to the recommendations sidebar, not the requested list.
+    # Initials JSON: Account lists, search results, category pages, channel/creator listings.
+    # Modern xHamster renders complete videoThumbProps inside window.initials while leaving
+    # most DOM thumbnail cards as empty placeholder skeletons.
     script = parser.css_first("script#initials-script")
     if script is not None and "window.initials=" in script.text():
         try:
             initials = json.loads(script.text().split("window.initials=", 1)[1].strip().rstrip(";"))
         except (ValueError, TypeError):
-            initials = {}
+            try:
+                import chompjs
+                initials = chompjs.parse_js_object(script.text().split("window.initials=", 1)[1].strip().rstrip(";"))
+            except Exception:
+                initials = {}
         if not isinstance(initials, dict):
             initials = {}
+
         layout = initials.get("layoutPage", {})
         liked = layout.get("likedVideosListProps") if isinstance(layout, dict) else None
         account_rows = None
@@ -40,7 +46,9 @@ def extractor_videos(html_content: str, base_url: str = "https://xhamster.com") 
             account_rows = liked.get("videoThumbProps", [])
         elif "favoritesVideoCollection" in initials:
             account_rows = initials["favoritesVideoCollection"]
+
         if isinstance(account_rows, list):
+            # Account lists: respect strict account collection without mixing recommendations
             seen = set()
             for item in account_rows:
                 if not isinstance(item, dict) or not item.get("pageURL"):
@@ -50,13 +58,61 @@ def extractor_videos(html_content: str, base_url: str = "https://xhamster.com") 
                     continue
                 seen.add(url)
                 stuff.append({
-                    "url": url, "video_id": str(item["id"]) if item.get("id") is not None else None,
+                    "url": url,
+                    "video_id": str(item["id"]) if item.get("id") is not None else None,
                     "title": item.get("title"),
                     "duration": str(item["duration"]) if item.get("duration") is not None else None,
                     "thumbnail": item.get("imageURL") or item.get("thumbURL"),
                     "preview_video": item.get("trailerURL"),
                     "views": str(item["views"]) if item.get("views") is not None else None,
                 })
+            return stuff
+
+        # For search, channels, creators, categories: collect all video listing rows
+        candidate_lists = []
+        if "searchResult" in initials and isinstance(initials["searchResult"], dict):
+            candidate_lists.append(initials["searchResult"].get("videoThumbProps"))
+        if isinstance(layout, dict) and "videoListProps" in layout and isinstance(layout["videoListProps"], dict):
+            candidate_lists.append(layout["videoListProps"].get("videoThumbProps"))
+
+        pages_cat = initials.get("pagesCategoryComponent")
+        if isinstance(pages_cat, dict) and "trendingVideoListProps" in pages_cat and isinstance(pages_cat["trendingVideoListProps"], dict):
+            candidate_lists.append(pages_cat["trendingVideoListProps"].get("videoThumbProps"))
+
+        for comp_name in ("trendingVideoSectionComponent", "newestVideoSectionComponent", "videoListProps"):
+            comp = initials.get(comp_name)
+            if isinstance(comp, dict):
+                if "videoListProps" in comp and isinstance(comp["videoListProps"], dict):
+                    candidate_lists.append(comp["videoListProps"].get("videoThumbProps"))
+                elif "videoThumbProps" in comp:
+                    candidate_lists.append(comp.get("videoThumbProps"))
+
+        seen = set()
+        for row_list in candidate_lists:
+            if not isinstance(row_list, list):
+                continue
+            for item in row_list:
+                if not isinstance(item, dict) or not item.get("pageURL"):
+                    continue
+                page_url = item["pageURL"]
+                # Skip shorts/moments that may be embedded in video listing carousels
+                if "/shorts/" in page_url or "/moments/" in page_url or item.get("videoType") == "moment":
+                    continue
+                url = urljoin(base_url, page_url)
+                if url in seen:
+                    continue
+                seen.add(url)
+                stuff.append({
+                    "url": url,
+                    "video_id": str(item["id"]) if item.get("id") is not None else None,
+                    "title": item.get("title"),
+                    "duration": str(item["duration"]) if item.get("duration") is not None else None,
+                    "thumbnail": item.get("imageURL") or item.get("thumbURL"),
+                    "preview_video": item.get("trailerURL"),
+                    "views": str(item["views"]) if item.get("views") is not None else None,
+                })
+
+        if stuff:
             return stuff
 
     # FIX 1: The site now renders MULTIPLE candidate containers on search
@@ -77,11 +133,6 @@ def extractor_videos(html_content: str, base_url: str = "https://xhamster.com") 
     # Dedupe guard: overlapping containers could yield the same video twice.
     seen_ids = set()
     for videos in containers:
-        # FIX 2: data-video-id has MOVED. It used to live on the
-        # div.mixed-section.index-videos wrapper; the site now puts it on
-        # each individual .video-thumb node inside that wrapper. Iterating
-        # the wrapper meant video_id was None for every entry, so all
-        # videos were silently skipped.
         _videos = videos.css(".video-thumb[data-video-id]")
 
         for video in _videos:
@@ -89,33 +140,39 @@ def extractor_videos(html_content: str, base_url: str = "https://xhamster.com") 
             if not video_id or video_id in seen_ids:
                 continue
 
-            # 1. Extract Video Metadata from the <a> tag
-            a_tag = video.css_first('a[data-role="thumb-link"]')
+            a_tag = video.css_first('a[data-role="thumb-link"], a.thumb-image-container, a')
             if a_tag:
                 url = a_tag.attributes.get("href")
                 preview_video = a_tag.attributes.get("data-previewvideo")
-                title = a_tag.attributes.get("aria-label")
+                title = a_tag.attributes.get("aria-label") or a_tag.attributes.get("title")
             else:
                 url = preview_video = title = None
 
             if not isinstance(url, str) or not url:
                 continue
 
+            # Skip shorts in DOM video listing
+            if "/shorts/" in url or "/moments/" in url or "video-thumb__moment" in video.attributes.get("class", ""):
+                continue
+
             seen_ids.add(video_id)
 
-            # 2. Extract Length/Duration safely
-            length_el = video.css_first('[data-role="video-duration"]')
+            if not title:
+                title_node = video.css_first('a[title], [class*="title-"]')
+                if title_node:
+                    title = title_node.attributes.get("title") or title_node.text(strip=True)
+
+            length_el = video.css_first('[data-role="video-duration"], span.eta')
             length = length_el.text(strip=True) if length_el else "N/A"
 
-            # 3. Extract Thumbnail
-            img_tag = video.css_first('img[data-role="thumb-preview-img"]')
-            thumbnail = img_tag.attributes.get("src") if img_tag else None
+            img_tag = video.css_first('img[data-role="thumb-preview-img"], img')
+            thumbnail = None
+            if img_tag:
+                thumbnail = img_tag.attributes.get("src") or img_tag.attributes.get("srcset") or img_tag.attributes.get("data-src")
 
-            # 4. Extract Views (Falls back to looking inside the metadata container)
             views_el = video.css_first("div.video-thumb-views")
             views = views_el.text(strip=True) if views_el else "0 views"
 
-            # Append the structured data
             stuff.append({
                 "title": title,
                 "duration": length,
@@ -132,31 +189,109 @@ def extractor_videos(html_content: str, base_url: str = "https://xhamster.com") 
 def extractor_shorts(html_content: str, base_url: str = "https://xhamster.com") -> list[dict[str, str]]:
     parser = LexborHTMLParser(html_content)
     stuff = []
+    seen = set()
 
-    videos = parser.css_first('div[data-role="video-section-container"]')
-    for video in videos.css("div.item-74fdf.thumb-list__item.video-thumb.video-thumb__moment.thumb-list__item--can-view"):
-        video_id = video.attributes.get("data-video-id")
+    # 1. Try initials script
+    script = parser.css_first("script#initials-script")
+    if script is not None and "window.initials=" in script.text():
+        try:
+            initials = json.loads(script.text().split("window.initials=", 1)[1].strip().rstrip(";"))
+        except (ValueError, TypeError):
+            try:
+                import chompjs
+                initials = chompjs.parse_js_object(script.text().split("window.initials=", 1)[1].strip().rstrip(";"))
+            except Exception:
+                initials = {}
 
-        a_tag = video.css_first("a")
-        url = a_tag.attributes.get("href")
-        if not isinstance(url, str) or not url:
+        if isinstance(initials, dict):
+            candidate_lists = []
+            mc = initials.get("momentsComponent")
+            if isinstance(mc, dict) and "videoListProps" in mc and isinstance(mc["videoListProps"], dict):
+                candidate_lists.append(mc["videoListProps"].get("videoThumbProps"))
+
+            lp = initials.get("layoutPage")
+            if isinstance(lp, dict):
+                mlp = lp.get("momentsListingProps")
+                if isinstance(mlp, dict) and "videoListProps" in mlp and isinstance(mlp["videoListProps"], dict):
+                    candidate_lists.append(mlp["videoListProps"].get("videoThumbProps"))
+
+            mlc = initials.get("momentsListComponent")
+            if isinstance(mlc, dict):
+                candidate_lists.append(mlc.get("videoThumbProps"))
+
+            # Fallback search for any videoThumbProps inside initials
+            if not candidate_lists:
+                def find_thumbs(obj):
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            if k == "videoThumbProps" and isinstance(v, list):
+                                candidate_lists.append(v)
+                            elif isinstance(v, (dict, list)):
+                                find_thumbs(v)
+                    elif isinstance(obj, list):
+                        for it in obj:
+                            if isinstance(it, (dict, list)):
+                                find_thumbs(it)
+                find_thumbs(initials)
+
+            for rows in candidate_lists:
+                if not isinstance(rows, list):
+                    continue
+                for item in rows:
+                    if not isinstance(item, dict) or not item.get("pageURL"):
+                        continue
+                    url = urljoin(base_url, item["pageURL"])
+                    if url in seen:
+                        continue
+                    seen.add(url)
+                    stuff.append({
+                        "title": item.get("title"),
+                        "video_id": str(item["id"]) if item.get("id") is not None else None,
+                        "url": url,
+                        "preview_video": item.get("trailerURL"),
+                        "thumbnail": item.get("imageURL") or item.get("thumbURL"),
+                        "views": str(item["views"]) if item.get("views") is not None else "0",
+                    })
+
+            if stuff:
+                return stuff
+
+    # 2. DOM fallback
+    for item in parser.css(".video-thumb.video-thumb__moment, .video-thumb[data-video-type='moment'], .video-thumb"):
+        vid = item.attributes.get("data-video-id")
+        a_tag = item.css_first("a[data-role='thumb-link'], a.thumb-image-container--moment, a")
+        if not a_tag:
             continue
-        preview_video = a_tag.attributes.get("data-previewvideo")
+        href = a_tag.attributes.get("href")
+        if not href:
+            continue
+        url = urljoin(base_url, href)
+        if url in seen:
+            continue
+        seen.add(url)
 
-        img_tag = video.css_first("img")
-        thumbnail = img_tag.attributes.get("src")
+        title_el = item.css_first("a[title], [class*='title-']")
+        title = (title_el.attributes.get("title") or title_el.text(strip=True)) if title_el else None
+        if not title:
+            title = a_tag.attributes.get("aria-label") or a_tag.attributes.get("title")
 
-        title = video.css_first("a[title]").attributes.get("title")
-        views = video.css_first("div.video-thumb-views").text(strip=True)
+        img_el = item.css_first("img")
+        thumb = None
+        if img_el:
+            thumb = img_el.attributes.get("src") or img_el.attributes.get("srcset") or img_el.attributes.get("data-src")
+
+        views_el = item.css_first(".video-thumb-views")
+        views = views_el.text(strip=True) if views_el else "0 views"
 
         stuff.append({
             "title": title,
-            "video_id": video_id,
-            "url": urljoin(base_url, url),
-            "preview_video": preview_video,
-            "thumbnail": thumbnail,
+            "video_id": vid,
+            "url": url,
+            "preview_video": a_tag.attributes.get("data-previewvideo"),
+            "thumbnail": thumb,
             "views": views
         })
+
     return stuff
 
 

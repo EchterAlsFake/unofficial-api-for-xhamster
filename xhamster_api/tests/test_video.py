@@ -9,7 +9,7 @@ async def test_all_video():
     try:
         import av
     except (ModuleNotFoundError, ImportError):
-        raise "Can't run tests without av installed!"
+        pytest.skip("Can't run tests without av installed!")
 
     client = Client()
     video = await client.get_video("https://xhamster.com/videos/im-not-a-whore-i-just-love-sex-why-dont-i-have-sex-with-two-guys-xheJpw6")

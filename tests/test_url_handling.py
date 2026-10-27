@@ -45,6 +45,26 @@ class UrlHandlingTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_creator_shorts_fetches_two_distinct_pages(self):
+        media = api.Creator(url="https://ge.xhamster.desi/creators/Example/newest/9?tag=example#videos", core=object())
+        capture = Mock(return_value=EmptyStream())
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for name in ("scrape_stream", "_scrape_stream"):
+                if hasattr(api, name):
+                    stack.enter_context(patch.object(api, name, capture))
+            async for _ in media.get_shorts(pages=2):
+                pass
+        urls = capture.call_args.kwargs["target_page_urls"]
+        self.assertEqual(
+            urls,
+            [
+                "https://ge.xhamster.desi/creators/Example/shorts?tag=example",
+                "https://ge.xhamster.desi/creators/Example/shorts/2?tag=example",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

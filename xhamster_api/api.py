@@ -8,7 +8,7 @@ import asyncio
 import argparse
 
 from xhamster_api.modules import errors as provider_errors
-from base_api import update_url_query
+from base_api import update_url_query, append_url_path
 from base_api import profile_base_url
 from base_api.modules.provider import fetch_content, download_errors, download_hls
 from base_api.modules.logger import configure_app_logging, get_logger, log_context
@@ -227,20 +227,19 @@ class Something(BaseMedia):
             pages: int = 2,
             iterator_config: IteratorConfig | None = None,
     ) -> AsyncGenerator[ScrapeResult[Short], None]:
-        url = self.url
-
-        if not url.endswith("/"):
-            url += "/"
-
-        url += "shorts"
-        page_urls = [build_page_url(self.resolved_url or url, is_search=False, idx=page) for page in range(1, pages + 1)]
+        base_url = profile_base_url(self.resolved_url or self.url, depth=2)
+        shorts_url = append_url_path(base_url, "shorts")
+        page_urls = [build_page_url(shorts_url, is_search=False, idx=page) for page in range(1, pages + 1)]
         return scrape_stream(
             core=self.core,
             constructor=Short,
             target_page_urls=page_urls,
-            item_extractor=extractor_shorts,
+            item_extractor=partial(extractor_shorts, base_url=shorts_url),
             iterator_config=iterator_config,
         )
+
+    shorts = get_shorts
+    get_videos = videos
 
 
 class Channel(Something):
@@ -334,30 +333,111 @@ class Short(BaseMedia):
     @staticmethod
     def _extract_data(html_content: str) -> dict:
         lexbor = LexborHTMLParser(html_content)
-        script = lexbor.css_first("script#initials-script").text()
-        # Extract the JSON part after 'window.initials='
-        json_text = script.split("window.initials=", 1)[-1].strip().rstrip(";")
-        data = chompjs.parse_js_object(json_text)
-        title = data.get('layoutPage', {}).get('momentProps', {}).get('title', '')
-        author = data.get('layoutPage', {}).get('momentProps', {}).get('landing', {}).get('name')
-        likes = data.get('layoutPage', {}).get('momentProps', {}).get('ratingModel', {}).get('likes')
-        views = data.get('layoutPage', {}).get('momentProps', {}).get('views')
-        comments = data.get('layoutPage', {}).get('momentProps', {}).get('comments')
-        duration = data.get('xplayerSettings', {}).get('duration')
-        video_id = data.get('xplayerSettings', {}).get('videoId')
-        if not video_id:
-             video_id = data.get('layoutPage', {}).get('momentProps', {}).get('id')
+        data = {}
+        script = lexbor.css_first("script#initials-script")
+        if script and script.text() and "window.initials=" in script.text():
+            try:
+                json_text = script.text().split("window.initials=", 1)[-1].strip().rstrip(";")
+                data = chompjs.parse_js_object(json_text)
+            except Exception as e:
+                logger.warning("Failed to parse initials-script for short: %s", e)
 
-        created = data.get('layoutPage', {}).get('momentProps', {}).get('created')
-        tags = data.get('layoutPage', {}).get('momentProps', {}).get('tags', [])
-        subscribers = data.get('layoutPage', {}).get('momentProps', {}).get('landing', {}).get('subscribers')
-        author_logo = data.get('layoutPage', {}).get('momentProps', {}).get('landing', {}).get('logo', '')
-        author_link = data.get('layoutPage', {}).get('momentProps', {}).get('landing', {}).get('link', '')
-        thumb_url = data.get('layoutPage', {}).get('momentProps', {}).get('thumbUrl', '')
-        poster_url = data.get('layoutPage', {}).get('momentProps', {}).get('posterUrl', '')
-        m3u8_base_url = data.get('xplayerSettings', {}).get('sources', {}).get('hls', {}).get('h264', {}).get('url')
-        if not m3u8_base_url:
-            m3u8_base_url = data.get('layoutPage', {}).get('momentProps', {}).get('sources', {}).get('hls', {}).get('h264', {}).get('url')
+        moment_props = data.get("layoutPage", {}).get("momentProps", {}) if isinstance(data, dict) else {}
+        xplayer = data.get("xplayerSettings", {}) if isinstance(data, dict) else {}
+
+        title = moment_props.get("title") if isinstance(moment_props, dict) else None
+        if not title:
+            og_title = lexbor.css_first("meta[property='og:title']")
+            title = og_title.attributes.get("content") if og_title else None
+        if not title:
+            h1 = lexbor.css_first("h1")
+            title = h1.text(strip=True) if h1 else ""
+
+        landing = moment_props.get("landing", {}) if isinstance(moment_props, dict) else {}
+        author = landing.get("name") if isinstance(landing, dict) else None
+        if not author:
+            author_el = lexbor.css_first("[data-role='user-name'], [class*='author-name'], .user-name")
+            author = author_el.text(strip=True) if author_el else ""
+
+        rating_model = moment_props.get("ratingModel", {}) if isinstance(moment_props, dict) else {}
+        likes = rating_model.get("likes") if isinstance(rating_model, dict) else None
+        if likes is None and isinstance(moment_props, dict):
+            likes = moment_props.get("rating", {}).get("likes")
+        if likes is not None:
+            try:
+                likes = int(likes)
+            except (ValueError, TypeError):
+                likes = 0
+        else:
+            likes = 0
+
+        views = moment_props.get("views", 0) if isinstance(moment_props, dict) else 0
+        try:
+            views = int(views) if views is not None else 0
+        except (ValueError, TypeError):
+            views = 0
+
+        comments = moment_props.get("comments", 0) if isinstance(moment_props, dict) else 0
+        try:
+            comments = int(comments) if comments is not None else 0
+        except (ValueError, TypeError):
+            comments = 0
+
+        duration = xplayer.get("duration") if isinstance(xplayer, dict) else None
+        if duration is None and isinstance(moment_props, dict):
+            duration = moment_props.get("duration")
+        try:
+            duration = int(duration) if duration is not None else 0
+        except (ValueError, TypeError):
+            duration = 0
+
+        video_id = xplayer.get("videoId") if isinstance(xplayer, dict) else None
+        if not video_id and isinstance(moment_props, dict):
+            video_id = moment_props.get("id")
+        if video_id is not None:
+            try:
+                video_id = int(video_id)
+            except (ValueError, TypeError):
+                video_id = 0
+
+        created = moment_props.get("created") if isinstance(moment_props, dict) else None
+        try:
+            created = int(created) if created is not None else None
+        except (ValueError, TypeError):
+            pass
+
+        tags = moment_props.get("tags", []) if isinstance(moment_props, dict) else []
+        subscribers = landing.get("subscribers") if isinstance(landing, dict) else None
+        if subscribers is not None:
+            try:
+                subscribers = int(subscribers)
+            except (ValueError, TypeError):
+                pass
+
+        author_logo = landing.get("logo", "") if isinstance(landing, dict) else ""
+        author_link = landing.get("link", "") if isinstance(landing, dict) else ""
+        thumb_url = moment_props.get("thumbUrl", "") if isinstance(moment_props, dict) else ""
+        poster_url = moment_props.get("posterUrl", "") if isinstance(moment_props, dict) else ""
+
+        if not thumb_url:
+            og_img = lexbor.css_first("meta[property='og:image']")
+            thumb_url = og_img.attributes.get("content", "") if og_img else ""
+
+        m3u8_base_url = (
+            xplayer.get("sources", {}).get("hls", {}).get("h264", {}).get("url")
+            or moment_props.get("sources", {}).get("hls", {}).get("h264", {}).get("url")
+        )
+        if not m3u8_base_url or not str(m3u8_base_url).startswith("http"):
+            std_sources = moment_props.get("sources", {}).get("standard", {}).get("h264", []) if isinstance(moment_props, dict) else []
+            if isinstance(std_sources, list):
+                for s in std_sources:
+                    if isinstance(s, dict) and str(s.get("url", "")).startswith("http"):
+                        m3u8_base_url = s["url"]
+                        break
+            if not m3u8_base_url or not str(m3u8_base_url).startswith("http"):
+                m3u8_match = REGEX_M3U8.search(html_content)
+                if m3u8_match:
+                    m3u8_base_url = m3u8_match.group(0).replace(r"\/", "/")
 
         return {
             "title": title,
@@ -374,7 +454,7 @@ class Short(BaseMedia):
             "author_link": author_link,
             "thumbnail": thumb_url,
             "poster_url": poster_url,
-            "m3u8_base_url": m3u8_base_url
+            "m3u8_base_url": m3u8_base_url or ""
         }
 
     @download_errors(DownloadFailed)
@@ -610,9 +690,13 @@ class Video(BaseMedia):
                     max_resolution = val
                     break
 
-        if is_hd is None:
-            is_hd = bool(parser.css_first("span.HD")) or (
-                max_resolution in ("720p", "1080p", "1440p", "2160p", "4k")
+        if is_hd is None or not is_hd:
+            is_hd = bool(
+                video_model.get("isHD")
+                or video_model.get("isFHD")
+                or video_model.get("isUHD")
+                or (max_resolution in ("720p", "1080p", "1440p", "2160p", "4k"))
+                or parser.css_first("span.HD")
             )
 
         if not orientation:
@@ -672,7 +756,8 @@ class Video(BaseMedia):
         if not uploader_name:
             uploader_el = parser.css_first(
                 ".entity-author-container__name span, .entity-author-container__name, "
-                "div.item-50dd2 span.body-bold-8643e.label-5984a.label-96c3e"
+                "div.item-50dd2 span.body-bold-8643e.label-5984a.label-96c3e, "
+                "[data-role='author-name'], a[data-role='video-uploader-link']"
             )
             if uploader_el:
                 uploader_name = uploader_el.text(strip=True)
@@ -710,13 +795,28 @@ class Video(BaseMedia):
                 preview_thumbnail = sprite_el.attributes.get("data-sprite")
 
         m3u8_base_url = ""
-        m3u8_match = REGEX_M3U8.search(html_content)
-        if m3u8_match:
-            m3u8_base_url = m3u8_match.group(0).replace(r"\/", "/")
-        elif (hls_url := data.get("xplayerSettings", {}).get("sources", {}).get("hls", {}).get("h264", {}).get("url")):
-            m3u8_base_url = hls_url
-        elif (fallback_vid := parser.css_first("video.player-container__no-script-video, a.player-container__no-player")):
-            m3u8_base_url = fallback_vid.attributes.get("src") or fallback_vid.attributes.get("href") or ""
+        preload_link = parser.css_first('link[rel="preload"][href*=".m3u8"]')
+        if preload_link and (p_href := preload_link.attributes.get("href")):
+            m3u8_base_url = p_href.replace(r"\/", "/")
+
+        if not m3u8_base_url:
+            m3u8_match = REGEX_M3U8.search(html_content)
+            if m3u8_match:
+                m3u8_base_url = m3u8_match.group(0).replace(r"\/", "/")
+
+        if not m3u8_base_url:
+            broad_match = re.search(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', html_content)
+            if broad_match:
+                m3u8_base_url = broad_match.group(0).replace(r"\/", "/")
+
+        if not m3u8_base_url:
+            hls_url = data.get("xplayerSettings", {}).get("sources", {}).get("hls", {}).get("h264", {}).get("url")
+            if hls_url and str(hls_url).startswith("http"):
+                m3u8_base_url = hls_url
+
+        if not m3u8_base_url:
+            if fallback_vid := parser.css_first("video.player-container__no-script-video, a.player-container__no-player"):
+                m3u8_base_url = fallback_vid.attributes.get("src") or fallback_vid.attributes.get("href") or ""
 
         if not m3u8_base_url:
             logger.warning("m3u8_base_url not found for %s", url)
@@ -793,6 +893,8 @@ class Client:
             await short.load_sources("html")
         return short
 
+    get_user = get_creator
+
     def search_videos(self, query: str,
         minimum_quality: Literal["720p", "1080p", "2160p"] = "720p",
         sort_by: Literal["views", "newest", "best", "longest"] | None = None, # Empty string sorts by relevance
@@ -810,12 +912,12 @@ class Client:
         iterator_config: IteratorConfig | None = None,
                             ) -> AsyncGenerator[ScrapeResult[Video], None]:
         path = quote(str(query), safe="")  # e.g. "4k cats & dogs" -> "4k%20cats%20%26%20dogs"
-        base = f"https://xhamster.com/search/"
-        url = base + path
+        base = "https://xhamster.com/search/"
+        url = base + path if path else "https://xhamster.com/search"
 
         params = {}
 
-        if minimum_quality:
+        if minimum_quality and not vr:
             params["quality"] = minimum_quality
 
         if sort_by:
@@ -966,10 +1068,13 @@ async def run_main(args_list: list[str] | None = None):
     for url in urls:
         print(f"Fetching video information for: {url}")
         try:
-            video = await client.get_video(url, load_html=True)
-            title = getattr(video, "title", None) or url
+            if "/shorts/" in url or "/moments/" in url:
+                media = await client.get_short(url, load_html=True)
+            else:
+                media = await client.get_video(url, load_html=True)
+            title = getattr(media, "title", None) or url
             print(f"Starting download for: {title}")
-            await video.download(configuration=config)
+            await media.download(configuration=config)
             print(f"Download complete: {title}")
         except Exception as e:
             logger.exception("CLI failed while processing %s", url)

@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "unofficial-api-for-xhamster"
-version = "2.6.4"
+version = "2.6.5"
 description = "An asynchronous Python API wrapper and scraper for xHamster"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12"
@@ -30,7 +30,7 @@ keywords = [
 dependencies = [
     "selectolax",
     "chompjs",
-    "eaf-base-api>=4.2.2",
+    "eaf-base-api>=4.2.5",
     "m3u8",
     "curl_cffi",
 ]
@@ -63,3 +63,9 @@ xhamster_api = "xhamster_api.api:main"
 [tool.uv.build-backend]
 module-name = "xhamster_api"
 module-root = ""
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio"
+]
