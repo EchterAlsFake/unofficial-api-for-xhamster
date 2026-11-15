@@ -46,6 +46,8 @@ def extractor_videos(html_content: str, base_url: str = "https://xhamster.com") 
             account_rows = liked.get("videoThumbProps", [])
         elif "favoritesVideoCollection" in initials:
             account_rows = initials["favoritesVideoCollection"]
+        elif isinstance(initials.get("singlePlaylistComponent"), dict):
+            account_rows = initials["singlePlaylistComponent"].get("playlist", {}).get("list")
 
         if isinstance(account_rows, list):
             # Account lists: respect strict account collection without mixing recommendations
